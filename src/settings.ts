@@ -84,7 +84,7 @@ export class NoteWidgetSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.notePath = value.trim();
 						await this.plugin.saveSettings();
-						this.plugin.widget.scheduleRender(150);
+						void this.plugin.widget.handleTargetChanged();
 						this.refreshStatus();
 					});
 			})
@@ -94,7 +94,7 @@ export class NoteWidgetSettingTab extends PluginSettingTab {
 						this.plugin.settings.notePath = file.path;
 						await this.plugin.saveSettings();
 						this.pathText?.setValue(file.path);
-						this.plugin.widget.scheduleRender(0);
+						void this.plugin.widget.handleTargetChanged();
 						this.refreshStatus();
 					}).open();
 				});

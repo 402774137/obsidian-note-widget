@@ -6,6 +6,8 @@
 const ICON_PIN = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>`;
 const ICON_REFRESH = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v5h-5"/></svg>`;
 const ICON_CLOSE = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`;
+const ICON_EDIT = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>`;
+const ICON_SAVE = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`;
 
 const CHROME_CSS = `
 :root { --nw-header-height: 26px; }
@@ -62,6 +64,62 @@ body.nw-body {
 .nw-btn:hover { background: var(--background-modifier-hover, rgba(255, 255, 255, 0.08)); color: var(--text-normal, #dcddde); }
 .nw-btn.is-active { color: var(--interactive-accent, #7c3aed); }
 .nw-btn svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.nw-btn-save { display: none; }
+body.nw-mode-edit .nw-btn-save { display: inline-flex; color: var(--interactive-accent, #7c3aed); }
+#nw-editor {
+	display: none;
+	box-sizing: border-box;
+	width: 100%;
+	height: calc(100% - var(--nw-header-height));
+	margin: 0;
+	padding: 10px 12px 18px;
+	border: none;
+	outline: none;
+	resize: none;
+	background-color: var(--background-primary, #1e1e1e);
+	color: var(--text-normal, #dcddde);
+	font-family: var(--font-monospace, "Cascadia Mono", Consolas, monospace);
+	font-size: 12.5px;
+	line-height: 1.65;
+	tab-size: 4;
+	white-space: pre-wrap;
+	overflow-y: auto;
+}
+body.nw-mode-edit #nw-editor { display: block; }
+body.nw-mode-edit #nw-root { display: none; }
+.nw-banner {
+	position: fixed;
+	left: 8px;
+	right: 8px;
+	bottom: 8px;
+	z-index: 10;
+	display: none;
+	align-items: center;
+	gap: 8px;
+	box-sizing: border-box;
+	padding: 7px 9px;
+	border-radius: 6px;
+	font-size: 12px;
+	line-height: 1.4;
+	background: var(--interactive-accent, #7c3aed);
+	color: var(--text-on-accent, #ffffff);
+	box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+}
+.nw-banner.is-visible { display: flex; }
+.nw-banner.is-error { background: var(--background-modifier-error, #8b2f2f); }
+.nw-banner-msg { flex: 1 1 auto; min-width: 0; }
+.nw-banner-actions { flex: 0 0 auto; display: flex; gap: 6px; }
+.nw-banner-btn {
+	flex: 0 0 auto;
+	padding: 2px 7px;
+	border: 1px solid rgba(255, 255, 255, 0.45);
+	border-radius: 4px;
+	background: transparent;
+	color: inherit;
+	font-size: 11.5px;
+	cursor: pointer;
+}
+.nw-banner-btn:hover { background: rgba(255, 255, 255, 0.16); }
 #nw-root {
 	box-sizing: border-box;
 	height: calc(100% - var(--nw-header-height));
@@ -89,6 +147,11 @@ const SHELL_SCRIPT = `
 (function () {
 	var seq = 0;
 	var currentLinks = {};
+	var editor = document.getElementById('nw-editor');
+	var banner = document.getElementById('nw-banner');
+	var bannerMsg = document.getElementById('nw-banner-msg');
+	var bannerActions = document.getElementById('nw-banner-actions');
+	var bannerTimer = null;
 	function applyLinks(links) {
 		var next = {};
 		(links || []).forEach(function (href) { next[href] = true; });
@@ -112,6 +175,63 @@ const SHELL_SCRIPT = `
 		seq += 1;
 		document.title = 'nw-action:' + kind + ':' + seq + ':' + encodeURIComponent(payload == null ? '' : String(payload));
 	}
+	function syncEditing(on) {
+		document.body.classList.toggle('nw-mode-edit', !!on);
+		var btn = document.querySelector('[data-nw-action="edit"]');
+		if (btn) btn.classList.toggle('is-active', !!on);
+	}
+	window.__nwHideBanner = function () {
+		if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+		if (!banner) return;
+		banner.className = 'nw-banner';
+		if (bannerActions) bannerActions.innerHTML = '';
+	};
+	window.__nwBanner = function (msg, kind, buttons) {
+		if (!banner) return;
+		window.__nwHideBanner();
+		banner.className = 'nw-banner is-visible' + (kind ? ' is-' + kind : '');
+		if (bannerMsg) bannerMsg.textContent = msg || '';
+		(buttons || []).forEach(function (item) {
+			var btn = document.createElement('button');
+			btn.type = 'button';
+			btn.className = 'nw-banner-btn';
+			btn.textContent = item.label;
+			btn.addEventListener('click', function () {
+				window.__nwHideBanner();
+				send(item.action, item.payload || '');
+			});
+			bannerActions.appendChild(btn);
+		});
+		if (kind !== 'error') {
+			bannerTimer = setTimeout(window.__nwHideBanner, 2200);
+		}
+	};
+	window.__nwSetEditing = function (on) {
+		syncEditing(on);
+		if (!on) window.__nwHideBanner();
+	};
+	window.__nwSetSource = function (text) {
+		if (!editor) return;
+		editor.value = typeof text === 'string' ? text : '';
+		editor.scrollTop = 0;
+	};
+	window.__nwGetSource = function () {
+		return editor ? editor.value : '';
+	};
+	function handleShortcut(ev) {
+		if ((ev.ctrlKey || ev.metaKey) && (ev.key === 's' || ev.key === 'S')) {
+			if (!document.body.classList.contains('nw-mode-edit')) return;
+			ev.preventDefault();
+			send('save', '');
+			return;
+		}
+		if (ev.key === 'Escape' && document.body.classList.contains('nw-mode-edit')) {
+			ev.preventDefault();
+			send('cancel', '');
+		}
+	}
+	if (editor) editor.addEventListener('keydown', handleShortcut);
+	document.addEventListener('keydown', handleShortcut, true);
 	document.addEventListener('click', function (ev) {
 		var node = ev.target;
 		if (!node || typeof node.closest !== 'function') return;
@@ -119,7 +239,11 @@ const SHELL_SCRIPT = `
 		if (actionEl) {
 			ev.preventDefault();
 			ev.stopPropagation();
-			send(actionEl.getAttribute('data-nw-action'), '');
+			var action = actionEl.getAttribute('data-nw-action');
+			if (action === 'edit') {
+				action = document.body.classList.contains('nw-mode-edit') ? 'cancel' : 'edit';
+			}
+			send(action, '');
 			return;
 		}
 		var link = node.closest('a');
@@ -151,10 +275,12 @@ const SHELL_SCRIPT = `
 			document.body.setAttribute('style', p.bodyStyle || '');
 		}
 		var collapsed = document.body.classList.contains('is-collapsed');
+		var editing = document.body.classList.contains('nw-mode-edit');
 		var edge = document.body.getAttribute('data-nw-edge');
 		var theme = p.theme === 'theme-light' ? 'theme-light' : 'theme-dark';
 		document.documentElement.className = theme;
 		document.body.className = 'nw-body ' + theme;
+		if (editing) document.body.classList.add('nw-mode-edit');
 		if (collapsed) {
 			document.body.classList.add('is-collapsed');
 			if (edge) document.body.setAttribute('data-nw-edge', edge);
@@ -184,11 +310,15 @@ export function buildShellDocument(): string {
 <body class="nw-body theme-dark">
 <header class="nw-header">
 	<span class="nw-title" id="nw-title">笔记小部件</span>
+	<button class="nw-btn" type="button" data-nw-action="edit" title="切换编辑/预览">${ICON_EDIT}</button>
+	<button class="nw-btn nw-btn-save" type="button" data-nw-action="save" title="保存（Ctrl+S）">${ICON_SAVE}</button>
 	<button class="nw-btn" type="button" data-nw-action="pin" title="始终置顶">${ICON_PIN}</button>
 	<button class="nw-btn" type="button" data-nw-action="refresh" title="刷新">${ICON_REFRESH}</button>
 	<button class="nw-btn" type="button" data-nw-action="close" title="关闭小部件">${ICON_CLOSE}</button>
 </header>
 <main id="nw-root" class="markdown-preview-view markdown-rendered"></main>
+<textarea id="nw-editor" spellcheck="false" placeholder="Markdown 源码"></textarea>
+<div id="nw-banner" class="nw-banner"><span class="nw-banner-msg" id="nw-banner-msg"></span><span class="nw-banner-actions" id="nw-banner-actions"></span></div>
 <script>${SHELL_SCRIPT}</script>
 </body>
 </html>`;

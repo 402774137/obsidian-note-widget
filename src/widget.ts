@@ -86,6 +86,10 @@ export class WidgetWindow {
 	private busy = false;
 	private outsideTicks = 0;
 	private preserveVisibleState = false;
+	/** 是否处于 Markdown 源码编辑模式 */
+	private editing = false;
+	/** 进入编辑模式时磁盘上的原文，用于检测外部修改 */
+	private editBaseline: string | null = null;
 
 	constructor(private plugin: NoteWidgetPlugin) {
 		this.plugin.registerEvent(
@@ -300,6 +304,8 @@ export class WidgetWindow {
 		this.hidden = false;
 		this.revealArmed = false;
 		this.busy = false;
+		this.editing = false;
+		this.editBaseline = null;
 		this.cleanupHost();
 
 		if (!this.preserveVisibleState) {
@@ -348,6 +354,22 @@ export class WidgetWindow {
 			case "external":
 				this.openExternal(payload);
 				break;
+			case "edit":
+				await this.beginEdit();
+				break;
+			case "cancel":
+			case "view":
+				await this.exitEdit();
+				break;
+			case "save":
+				await this.saveDraft(false);
+				break;
+			case "force-save":
+				await this.saveDraft(true);
+				break;
+			case "reload":
+				await this.reloadSource();
+				break;
 		}
 	}
 
@@ -392,6 +414,144 @@ export class WidgetWindow {
 		await this.exec(
 			`(function(){var b=document.querySelector('[data-nw-action="pin"]');if(b)b.classList.toggle('is-active',${pinned ? "true" : "false"});})()`
 		);
+	}
+
+	// ---------------------------------------------------------------- 轻量编辑
+
+	private async banner(message: string, kind: "info" | "error" = "info", buttons: Array<{ label: string; action: string }> = []): Promise<void> {
+		await this.exec(`window.__nwBanner && window.__nwBanner(${JSON.stringify(message)}, ${JSON.stringify(kind)}, ${JSON.stringify(buttons)})`);
+	}
+
+	/** 进入源码编辑：从磁盘读取原文，作为冲突检测基准 */
+	private async beginEdit(): Promise<void> {
+		const file = this.plugin.getTargetFile();
+		if (!file) {
+			await this.banner("未找到目标笔记，请先在设置中选择", "error");
+			return;
+		}
+		let source: string;
+		try {
+			source = await this.plugin.app.vault.read(file);
+		} catch {
+			await this.banner("读取笔记失败", "error");
+			return;
+		}
+		this.editing = true;
+		this.editBaseline = source;
+		await this.exec(`window.__nwSetSource && window.__nwSetSource(${JSON.stringify(source)})`);
+		await this.exec(`window.__nwSetEditing && window.__nwSetEditing(true)`);
+		await this.exec(`(function(){var e=document.getElementById('nw-editor');if(e)e.focus();})()`);
+	}
+
+	/** 退出编辑（丢弃草稿），回到渲染模式 */
+	private async exitEdit(): Promise<void> {
+		this.editing = false;
+		this.editBaseline = null;
+		await this.exec(`window.__nwSetEditing && window.__nwSetEditing(false)`);
+		await this.render();
+	}
+
+	/** 从磁盘重新载入原文（用于放弃本地改动） */
+	private async reloadSource(): Promise<void> {
+		const file = this.plugin.getTargetFile();
+		if (!file) {
+			await this.banner("未找到目标笔记", "error");
+			return;
+		}
+		let source: string;
+		try {
+			source = await this.plugin.app.vault.read(file);
+		} catch {
+			await this.banner("读取笔记失败", "error");
+			return;
+		}
+		this.editing = true;
+		this.editBaseline = source;
+		await this.exec(`window.__nwSetSource && window.__nwSetSource(${JSON.stringify(source)})`);
+		await this.exec(`window.__nwSetEditing && window.__nwSetEditing(true)`);
+		await this.banner("已重新载入笔记原文");
+	}
+
+	/**
+	 * 保存草稿。force=false 时若发现笔记在编辑期间被别处修改，则拒绝覆盖并提示。
+	 */
+	private async saveDraft(force: boolean): Promise<void> {
+		if (!this.editing) return;
+		const file = this.plugin.getTargetFile();
+		if (!file) {
+			await this.banner("未找到目标笔记", "error");
+			return;
+		}
+		const draft = await this.execValue(`window.__nwGetSource ? window.__nwGetSource() : null`);
+		if (typeof draft !== "string") {
+			await this.banner("读取编辑内容失败", "error");
+			return;
+		}
+		if (draft === this.editBaseline) {
+			await this.exitEdit();
+			await this.banner("没有需要保存的改动");
+			return;
+		}
+		let current: string;
+		try {
+			current = await this.plugin.app.vault.read(file);
+		} catch {
+			await this.banner("读取笔记失败", "error");
+			return;
+		}
+		if (!force && this.editBaseline !== null && current !== this.editBaseline && current !== draft) {
+			await this.banner("笔记已在其他窗口被修改，未保存以免覆盖", "error", [
+				{ label: "重新载入", action: "reload" },
+				{ label: "仍然覆盖", action: "force-save" },
+			]);
+			return;
+		}
+		this.editBaseline = draft;
+		try {
+			await this.plugin.app.vault.modify(file, draft);
+		} catch {
+			await this.banner("保存失败，请检查文件权限", "error");
+			return;
+		}
+		this.editing = false;
+		this.editBaseline = null;
+		await this.exec(`window.__nwSetEditing && window.__nwSetEditing(false)`);
+		await this.render();
+		await this.banner("已保存");
+	}
+
+	/**
+	 * 目标笔记被修改时的入口：编辑中只做冲突提示，不覆盖草稿；否则刷新渲染。
+	 */
+	async handleVaultChange(): Promise<void> {
+		if (!this.editing) {
+			this.scheduleRender();
+			return;
+		}
+		const file = this.plugin.getTargetFile();
+		if (!file || this.editBaseline === null) return;
+		let current: string;
+		try {
+			current = await this.plugin.app.vault.read(file);
+		} catch {
+			return;
+		}
+		if (current === this.editBaseline) return;
+		await this.banner("笔记已在其他窗口被修改，你的草稿尚未保存", "error", [
+			{ label: "重新载入", action: "reload" },
+			{ label: "仍然覆盖", action: "force-save" },
+		]);
+	}
+
+	/** 目标笔记被切换或删除：退出编辑并刷新渲染 */
+	async handleTargetChanged(): Promise<void> {
+		if (this.editing) {
+			this.editing = false;
+			this.editBaseline = null;
+			await this.exec(`window.__nwSetEditing && window.__nwSetEditing(false)`);
+			await this.banner("目标笔记已变更，已退出编辑");
+		}
+		await this.render();
 	}
 
 	// ------------------------------------------------------------------- 渲染
@@ -896,6 +1056,16 @@ export class WidgetWindow {
 			await this.win.webContents.executeJavaScript(script, true);
 		} catch {
 			/* 忽略窗口关闭过程中的执行失败 */
+		}
+	}
+
+	/** 执行脚本并取回结果（用于读取编辑框内容） */
+	private async execValue(script: string): Promise<unknown> {
+		if (!this.isOpen()) return null;
+		try {
+			return await this.win.webContents.executeJavaScript(script, true);
+		} catch {
+			return null;
 		}
 	}
 }

@@ -29,7 +29,7 @@ export default class NoteWidgetPlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on("modify", (file) => {
 				if (file instanceof TFile && file.path === this.getTargetFile()?.path) {
-					this.widget.scheduleRender();
+					void this.widget.handleVaultChange();
 				}
 			})
 		);
@@ -43,7 +43,7 @@ export default class NoteWidgetPlugin extends Plugin {
 		);
 		this.registerEvent(
 			this.app.vault.on("delete", (file) => {
-				if (file.path === this.settings.notePath) this.widget.scheduleRender(0);
+				if (file.path === this.settings.notePath) void this.widget.handleTargetChanged();
 			})
 		);
 
