@@ -28,6 +28,31 @@ const ACTION_PREFIX = "nw-action:";
 /** 小部件窗口标题（动作消息会临时改写 document.title，需要在处理后还原） */
 const WIDGET_TITLE = "笔记小部件";
 
+/** 任务列表行：允许缩进、引用前缀，列表标记兼容 -、*、+ 与有序列表 */
+const TASK_LINE_RE = /^\s*(?:>\s*)*(?:[-*+]|\d+[.)])\s+\[[ xX]\](?=\s|$)/;
+/** 用于定位并只替换勾选字符（保留其余内容） */
+const TASK_LINE_PARTS_RE = /^(\s*(?:>\s*)*(?:[-*+]|\d+[.)])\s+\[)([ xX])(\])/;
+
+/** 收集 Markdown 源码中任务行的行号（0 起），跳过围栏代码块 */
+function collectTaskLines(markdown: string): number[] {
+	const lines = markdown.split("\n");
+	const result: number[] = [];
+	let fence: string | null = null;
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index];
+		const fenceMatch = /^\s*(`{3,}|~{3,})/.exec(line);
+		if (fenceMatch) {
+			const marker = fenceMatch[1].charAt(0);
+			if (fence === null) fence = marker;
+			else if (fence === marker) fence = null;
+			continue;
+		}
+		if (fence) continue;
+		if (TASK_LINE_RE.test(line)) result.push(index);
+	}
+	return result;
+}
+
 function getElectron(): any {
 	try {
 		// Obsidian 桌面端渲染进程是带 node 集成的，可以直接拿到 electron 模块
@@ -90,6 +115,10 @@ export class WidgetWindow {
 	private editing = false;
 	/** 进入编辑模式时磁盘上的原文，用于检测外部修改 */
 	private editBaseline: string | null = null;
+	/** 最近一次渲染所用的 Markdown 原文，用于检测点击勾选前的外部改动 */
+	private lastRenderSource: string | null = null;
+	/** 勾选写回进行中，避免连点造成重复翻转 */
+	private taskBusy = false;
 
 	constructor(private plugin: NoteWidgetPlugin) {
 		this.plugin.registerEvent(
@@ -236,6 +265,7 @@ export class WidgetWindow {
 		let title: string;
 
 		if (!file) {
+			this.lastRenderSource = null;
 			title = "笔记小部件";
 			html =
 				`<div class="nw-empty"><div class="nw-empty-title">未选择笔记</div>` +
@@ -306,6 +336,8 @@ export class WidgetWindow {
 		this.busy = false;
 		this.editing = false;
 		this.editBaseline = null;
+		this.lastRenderSource = null;
+		this.taskBusy = false;
 		this.cleanupHost();
 
 		if (!this.preserveVisibleState) {
@@ -369,6 +401,9 @@ export class WidgetWindow {
 				break;
 			case "reload":
 				await this.reloadSource();
+				break;
+			case "task":
+				await this.toggleTask(payload);
 				break;
 		}
 	}
@@ -554,6 +589,73 @@ export class WidgetWindow {
 		await this.render();
 	}
 
+	// ------------------------------------------------------------------- 任务勾选
+
+	/**
+	 * 点击渲染模式下的任务复选框：把对应源码行的勾选状态写回笔记。
+	 * 行号来自渲染时的任务行顺序映射（见 annotateTaskCheckboxes）。
+	 * 若笔记在渲染后被别处改过，只刷新并提示，不覆盖。
+	 */
+	private async toggleTask(payload: string): Promise<void> {
+		if (this.editing || this.taskBusy) return;
+		const lineIndex = Number(payload);
+		if (!Number.isInteger(lineIndex) || lineIndex < 0) return;
+
+		const file = this.plugin.getTargetFile();
+		if (!file) {
+			await this.banner("未找到目标笔记", "error");
+			return;
+		}
+
+		let source: string;
+		try {
+			source = await this.plugin.app.vault.read(file);
+		} catch {
+			await this.banner("读取笔记失败，勾选未保存", "error");
+			return;
+		}
+		if (this.lastRenderSource !== null && source !== this.lastRenderSource) {
+			await this.render();
+			await this.banner("笔记已在别处被修改，已刷新，请重新勾选", "error");
+			return;
+		}
+
+		const lines = source.split("\n");
+		const line = lines[lineIndex];
+		const parts = typeof line === "string" ? TASK_LINE_PARTS_RE.exec(line) : null;
+		if (!parts) {
+			await this.render();
+			await this.banner("没有找到对应的任务行，已刷新", "error");
+			return;
+		}
+		const nextMark = parts[2] === " " ? "x" : " ";
+		lines[lineIndex] = parts[1] + nextMark + parts[3] + line.slice(parts[0].length);
+		const nextSource = lines.join("\n");
+
+		this.taskBusy = true;
+		let conflict = false;
+		try {
+			// process 会基于最新内容写入，避免在读取与写入之间被外部改动后静默覆盖
+			await this.plugin.app.vault.process(file, (data) => {
+				if (data !== source) {
+					conflict = true;
+					return data;
+				}
+				return nextSource;
+			});
+		} catch {
+			this.taskBusy = false;
+			await this.banner("写回笔记失败，勾选未保存", "error");
+			return;
+		}
+		this.taskBusy = false;
+
+		await this.render();
+		if (conflict) {
+			await this.banner("笔记已在别处被修改，已刷新，请重新勾选", "error");
+		}
+	}
+
 	// ------------------------------------------------------------------- 渲染
 
 	private async renderNoteHtml(file: TFile): Promise<string> {
@@ -566,10 +668,13 @@ export class WidgetWindow {
 
 		try {
 			const markdown = await app.vault.cachedRead(file);
+			this.lastRenderSource = markdown;
+			const taskLines = collectTaskLines(markdown);
 			await MarkdownRenderer.render(app, markdown, host, file.path, this.plugin);
 			// 给 Dataview / Mermaid 之类的异步后处理器一点时间
 			await new Promise<void>((resolve) => window.setTimeout(resolve, 80));
 			this.rewriteLinks(host, file);
+			this.annotateTaskCheckboxes(host, taskLines);
 			return host.innerHTML;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -597,6 +702,18 @@ export class WidgetWindow {
 			if (/^(https?:|mailto:)/i.test(href) || anchor.classList.contains("external-link")) {
 				if (href) anchor.setAttribute("data-nw-external", href);
 			}
+		});
+	}
+
+	private annotateTaskCheckboxes(host: HTMLElement, taskLines: number[]): void {
+		const boxes = host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+		// 数量不一致说明有额外/缺失的复选框（例如插件动态生成），此时不标注，保持只读以免改错行
+		if (!boxes.length || boxes.length !== taskLines.length) return;
+		boxes.forEach((box, index) => {
+			box.setAttribute("data-nw-task", String(taskLines[index]));
+			// 渲染结果默认是禁用状态，放开禁用才能触发点击
+			box.removeAttribute("disabled");
+			box.disabled = false;
 		});
 	}
 

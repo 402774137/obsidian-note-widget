@@ -134,6 +134,8 @@ body.nw-mode-edit #nw-root { display: none; }
 #nw-root::-webkit-scrollbar-track { background: transparent; }
 #nw-root > *:first-child { margin-top: 2px; }
 #nw-root a[data-nw-open], #nw-root a[data-nw-external] { cursor: pointer; }
+/* 可点击勾选的任务复选框 */
+#nw-root input[type="checkbox"][data-nw-task] { cursor: pointer; }
 .nw-empty { padding: 22px 6px; color: var(--text-muted, #9aa0a6); }
 .nw-empty-title { margin-bottom: 6px; font-weight: 600; color: var(--text-normal, #dcddde); }
 .nw-empty-desc { font-size: 12px; line-height: 1.6; }
@@ -244,6 +246,13 @@ const SHELL_SCRIPT = `
 				action = document.body.classList.contains('nw-mode-edit') ? 'cancel' : 'edit';
 			}
 			send(action, '');
+			return;
+		}
+		var taskEl = node.closest('[data-nw-task]');
+		if (taskEl) {
+			ev.preventDefault();
+			ev.stopPropagation();
+			send('task', taskEl.getAttribute('data-nw-task'));
 			return;
 		}
 		var link = node.closest('a');
