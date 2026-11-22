@@ -1,0 +1,9 @@
+{
+  "id": "obsidian-note-widget",
+  "name": "Note Widget",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "把指定笔记固定显示在独立的无边框桌面小窗口里，支持置顶、贴边自动隐藏。",
+  "author": "",
+  "isDesktopOnly": true
+}

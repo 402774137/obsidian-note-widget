@@ -1,0 +1,24 @@
+/* 插件在 Obsidian 主窗口中使用的样式（小部件窗口自身样式见 src/widget-ui.ts） */
+
+/* 离屏渲染宿主：在主窗口里按小部件宽度真实排版一遍，再把 HTML 搬到小部件里 */
+.note-widget-render-host {
+	position: fixed;
+	top: 0;
+	left: -100000px;
+	width: 360px;
+	opacity: 0;
+	pointer-events: none;
+	contain: layout style;
+	z-index: -1;
+}
+
+.note-widget-status {
+	margin: -10px 0 18px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	word-break: break-all;
+}
+
+.note-widget-status.is-warning {
+	color: var(--text-warning);
+}

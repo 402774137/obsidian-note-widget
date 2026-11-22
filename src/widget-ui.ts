@@ -1,0 +1,195 @@
+/**
+ * 小部件窗口自身的界面：外壳 HTML、外层样式和与插件通信的脚本。
+ * 小部件是独立的 Electron 窗口，加载不到 Obsidian 的 styles.css，因此这里内联。
+ */
+
+const ICON_PIN = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>`;
+const ICON_REFRESH = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v5h-5"/></svg>`;
+const ICON_CLOSE = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`;
+
+const CHROME_CSS = `
+:root { --nw-header-height: 26px; }
+html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+body.nw-body {
+	padding: 0;
+	font-family: var(--font-interface, "Segoe UI", system-ui, sans-serif);
+	font-size: 13px;
+	line-height: 1.5;
+	color: var(--text-normal, #dcddde);
+	background-color: var(--background-primary, #1e1e1e);
+	-webkit-font-smoothing: antialiased;
+}
+.nw-header {
+	position: relative;
+	display: flex;
+	align-items: center;
+	box-sizing: border-box;
+	height: var(--nw-header-height);
+	padding: 0 4px 0 10px;
+	background: var(--background-secondary, rgba(255, 255, 255, 0.04));
+	border-bottom: 1px solid var(--background-modifier-border, rgba(255, 255, 255, 0.08));
+	-webkit-app-region: drag;
+	user-select: none;
+}
+.nw-title {
+	flex: 1 1 auto;
+	min-width: 0;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.2px;
+	color: var(--text-muted, #9aa0a6);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.nw-btn {
+	-webkit-app-region: no-drag;
+	flex: 0 0 auto;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 22px;
+	height: 20px;
+	margin-left: 1px;
+	padding: 0;
+	border: none;
+	border-radius: 4px;
+	background: transparent;
+	color: var(--text-muted, #9aa0a6);
+	cursor: pointer;
+	box-shadow: none !important;
+}
+.nw-btn:hover { background: var(--background-modifier-hover, rgba(255, 255, 255, 0.08)); color: var(--text-normal, #dcddde); }
+.nw-btn.is-active { color: var(--interactive-accent, #7c3aed); }
+.nw-btn svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+#nw-root {
+	box-sizing: border-box;
+	height: calc(100% - var(--nw-header-height));
+	padding: 4px 14px 18px;
+	overflow-x: hidden;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+}
+#nw-root.markdown-rendered { font-size: var(--font-text-size, 14px); }
+#nw-root::-webkit-scrollbar { width: 8px; }
+#nw-root::-webkit-scrollbar-thumb { background-color: var(--scrollbar-thumb-bg, rgba(255, 255, 255, 0.14)); border-radius: 4px; }
+#nw-root::-webkit-scrollbar-track { background: transparent; }
+#nw-root > *:first-child { margin-top: 2px; }
+#nw-root a[data-nw-open], #nw-root a[data-nw-external] { cursor: pointer; }
+.nw-empty { padding: 22px 6px; color: var(--text-muted, #9aa0a6); }
+.nw-empty-title { margin-bottom: 6px; font-weight: 600; color: var(--text-normal, #dcddde); }
+.nw-empty-desc { font-size: 12px; line-height: 1.6; }
+/* 收起后只露出很窄的一条触发条：把标题栏涂成强调色作为提示 */
+body.is-collapsed .nw-title, body.is-collapsed .nw-btn { display: none; }
+body.is-collapsed .nw-header { border-bottom: none; background: var(--interactive-accent, #7c3aed); }
+body.is-collapsed #nw-root { visibility: hidden; }
+`;
+
+const SHELL_SCRIPT = `
+(function () {
+	var seq = 0;
+	var currentLinks = {};
+	function applyLinks(links) {
+		var next = {};
+		(links || []).forEach(function (href) { next[href] = true; });
+		Object.keys(currentLinks).forEach(function (href) {
+			if (next[href]) return;
+			var el = currentLinks[href];
+			if (el && el.parentNode) el.parentNode.removeChild(el);
+			delete currentLinks[href];
+		});
+		Object.keys(next).forEach(function (href) {
+			if (currentLinks[href]) return;
+			var el = document.createElement('link');
+			el.rel = 'stylesheet';
+			el.href = href;
+			// 主题/核心样式放在内联样式之前，保证小部件自身的外壳规则可以覆盖
+			document.head.insertBefore(el, document.head.firstChild);
+			currentLinks[href] = el;
+		});
+	}
+	function send(kind, payload) {
+		seq += 1;
+		document.title = 'nw-action:' + kind + ':' + seq + ':' + encodeURIComponent(payload == null ? '' : String(payload));
+	}
+	document.addEventListener('click', function (ev) {
+		var node = ev.target;
+		if (!node || typeof node.closest !== 'function') return;
+		var actionEl = node.closest('[data-nw-action]');
+		if (actionEl) {
+			ev.preventDefault();
+			ev.stopPropagation();
+			send(actionEl.getAttribute('data-nw-action'), '');
+			return;
+		}
+		var link = node.closest('a');
+		if (!link) return;
+		if (link.hasAttribute('data-nw-open')) {
+			ev.preventDefault();
+			send('open', link.getAttribute('data-nw-open'));
+			return;
+		}
+		if (link.hasAttribute('data-nw-external')) {
+			ev.preventDefault();
+			send('external', link.getAttribute('data-nw-external'));
+			return;
+		}
+		var href = link.getAttribute('href') || '';
+		if (href.charAt(0) === '#') return;
+		if (href) ev.preventDefault();
+	}, true);
+	document.addEventListener('auxclick', function (ev) { ev.preventDefault(); }, true);
+	window.__nwUpdate = function (p) {
+		applyLinks(p.links);
+		if (p.css !== null && p.css !== undefined) {
+			document.getElementById('nw-app-css').textContent = p.css;
+		}
+		if ((p.htmlStyle || '') !== (document.documentElement.getAttribute('style') || '')) {
+			document.documentElement.setAttribute('style', p.htmlStyle || '');
+		}
+		if ((p.bodyStyle || '') !== (document.body.getAttribute('style') || '')) {
+			document.body.setAttribute('style', p.bodyStyle || '');
+		}
+		var collapsed = document.body.classList.contains('is-collapsed');
+		var edge = document.body.getAttribute('data-nw-edge');
+		var theme = p.theme === 'theme-light' ? 'theme-light' : 'theme-dark';
+		document.documentElement.className = theme;
+		document.body.className = 'nw-body ' + theme;
+		if (collapsed) {
+			document.body.classList.add('is-collapsed');
+			if (edge) document.body.setAttribute('data-nw-edge', edge);
+		}
+		document.getElementById('nw-title').textContent = p.title || '笔记小部件';
+		var pin = document.querySelector('[data-nw-action="pin"]');
+		if (pin) pin.classList.toggle('is-active', !!p.pinned);
+		document.getElementById('nw-root').innerHTML = p.html || '';
+		document.getElementById('nw-root').scrollTop = 0;
+	};
+	window.__nwSetCollapsed = function (collapsed, edge) {
+		document.body.classList.toggle('is-collapsed', !!collapsed);
+		if (collapsed) document.body.setAttribute('data-nw-edge', edge || '');
+		else document.body.removeAttribute('data-nw-edge');
+	};
+})();
+`;
+
+export function buildShellDocument(): string {
+	return `<!DOCTYPE html>
+<html class="theme-dark">
+<head>
+<meta charset="utf-8" />
+<style id="nw-app-css"></style>
+<style id="nw-chrome-css">${CHROME_CSS}</style>
+</head>
+<body class="nw-body theme-dark">
+<header class="nw-header">
+	<span class="nw-title" id="nw-title">笔记小部件</span>
+	<button class="nw-btn" type="button" data-nw-action="pin" title="始终置顶">${ICON_PIN}</button>
+	<button class="nw-btn" type="button" data-nw-action="refresh" title="刷新">${ICON_REFRESH}</button>
+	<button class="nw-btn" type="button" data-nw-action="close" title="关闭小部件">${ICON_CLOSE}</button>
+</header>
+<main id="nw-root" class="markdown-preview-view markdown-rendered"></main>
+<script>${SHELL_SCRIPT}</script>
+</body>
+</html>`;
+}
