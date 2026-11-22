@@ -8,6 +8,7 @@ const ICON_REFRESH = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 1
 const ICON_CLOSE = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`;
 const ICON_EDIT = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>`;
 const ICON_SAVE = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`;
+const ICON_OPEN_SOURCE = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>`;
 
 const CHROME_CSS = `
 :root { --nw-header-height: 26px; }
@@ -321,6 +322,7 @@ export function buildShellDocument(): string {
 	<span class="nw-title" id="nw-title">笔记小部件</span>
 	<button class="nw-btn" type="button" data-nw-action="edit" title="切换编辑/预览">${ICON_EDIT}</button>
 	<button class="nw-btn nw-btn-save" type="button" data-nw-action="save" title="保存（Ctrl+S）">${ICON_SAVE}</button>
+	<button class="nw-btn" type="button" data-nw-action="open-source" title="打开源文件">${ICON_OPEN_SOURCE}</button>
 	<button class="nw-btn" type="button" data-nw-action="pin" title="始终置顶">${ICON_PIN}</button>
 	<button class="nw-btn" type="button" data-nw-action="refresh" title="刷新">${ICON_REFRESH}</button>
 	<button class="nw-btn" type="button" data-nw-action="close" title="关闭小部件">${ICON_CLOSE}</button>

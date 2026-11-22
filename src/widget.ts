@@ -1,4 +1,4 @@
-import { MarkdownRenderer, TFile } from "obsidian";
+import { MarkdownRenderer, MarkdownView, TFile } from "obsidian";
 import type NoteWidgetPlugin from "./main";
 import { buildShellDocument } from "./widget-ui";
 
@@ -386,6 +386,9 @@ export class WidgetWindow {
 			case "external":
 				this.openExternal(payload);
 				break;
+			case "open-source":
+				await this.openSourceFile();
+				break;
 			case "edit":
 				await this.beginEdit();
 				break;
@@ -449,6 +452,45 @@ export class WidgetWindow {
 		await this.exec(
 			`(function(){var b=document.querySelector('[data-nw-action="pin"]');if(b)b.classList.toggle('is-active',${pinned ? "true" : "false"});})()`
 		);
+	}
+
+	/**
+	 * 在主窗口打开目标笔记：已打开则复用标签，没有就新开一个，并把主窗口带到前台。
+	 */
+	private async openSourceFile(): Promise<void> {
+		const file = this.plugin.getTargetFile();
+		if (!file) {
+			await this.banner("未找到目标笔记，请先在设置中选择", "error");
+			return;
+		}
+		try {
+			await this.plugin.app.vault.read(file);
+		} catch {
+			await this.banner("读取笔记失败，无法打开", "error");
+			return;
+		}
+
+		const workspace = this.plugin.app.workspace;
+		let leaf = workspace
+			.getLeavesOfType("markdown")
+			.find((item) => (item.view as MarkdownView).file?.path === file.path);
+		if (!leaf) {
+			leaf = workspace.getLeaf("tab");
+			try {
+				await leaf.openFile(file);
+			} catch {
+				await this.banner("打开笔记失败", "error");
+				return;
+			}
+		}
+		workspace.setActiveLeaf(leaf, { focus: true });
+
+		const mainWindow = getRemote()?.getCurrentWindow?.();
+		if (mainWindow && !mainWindow.isDestroyed()) {
+			if (mainWindow.isMinimized()) mainWindow.restore();
+			mainWindow.show();
+			mainWindow.focus();
+		}
 	}
 
 	// ---------------------------------------------------------------- 轻量编辑
