@@ -9,6 +9,7 @@ const ICON_CLOSE = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6
 const ICON_EDIT = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>`;
 const ICON_SAVE = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`;
 const ICON_OPEN_SOURCE = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>`;
+const ICON_PICK = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>`;
 
 const CHROME_CSS = `
 :root { --nw-header-height: 26px; }
@@ -137,6 +138,68 @@ body.nw-mode-edit #nw-root { display: none; }
 #nw-root a[data-nw-open], #nw-root a[data-nw-external] { cursor: pointer; }
 /* 可点击勾选的任务复选框 */
 #nw-root input[type="checkbox"][data-nw-task] { cursor: pointer; }
+/* 窗口内的笔记选择面板：限制在窗口内部，列表自身滚动 */
+.nw-picker {
+	position: absolute;
+	top: calc(var(--nw-header-height) + 4px);
+	left: 6px;
+	right: 6px;
+	z-index: 20;
+	display: none;
+	flex-direction: column;
+	max-height: calc(100% - var(--nw-header-height) - 12px);
+	box-sizing: border-box;
+	background: var(--background-primary, #1e1e1e);
+	border: 1px solid var(--background-modifier-border, rgba(255, 255, 255, 0.12));
+	border-radius: 6px;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+	overflow: hidden;
+}
+.nw-picker.is-visible { display: flex; }
+body.is-collapsed #nw-picker { display: none; }
+.nw-picker-input {
+	flex: 0 0 auto;
+	margin: 6px 6px 4px;
+	padding: 5px 8px;
+	border: 1px solid var(--background-modifier-border, rgba(255, 255, 255, 0.12));
+	border-radius: 4px;
+	outline: none;
+	background: var(--background-modifier-form-field, rgba(0, 0, 0, 0.2));
+	color: var(--text-normal, #dcddde);
+	font-family: inherit;
+	font-size: 12.5px;
+}
+.nw-picker-input:focus { border-color: var(--interactive-accent, #7c3aed); }
+.nw-picker-list {
+	flex: 1 1 auto;
+	min-height: 0;
+	padding: 0 4px 4px;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+}
+.nw-picker-item {
+	position: relative;
+	padding: 5px 8px;
+	border-radius: 4px;
+	cursor: pointer;
+}
+.nw-picker-item:hover, .nw-picker-item.is-active { background: var(--background-modifier-hover, rgba(255, 255, 255, 0.08)); }
+.nw-picker-item.is-current { padding-right: 40px; }
+.nw-picker-item.is-current .nw-picker-name { color: var(--interactive-accent, #7c3aed); }
+.nw-picker-name { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nw-picker-path { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-muted, #9aa0a6); }
+.nw-picker-badge {
+	position: absolute;
+	top: 5px;
+	right: 6px;
+	padding: 0 4px;
+	border-radius: 3px;
+	font-size: 10px;
+	line-height: 15px;
+	color: var(--text-on-accent, #ffffff);
+	background: var(--interactive-accent, #7c3aed);
+}
+.nw-picker-empty { padding: 12px 8px; font-size: 12px; color: var(--text-muted, #9aa0a6); }
 .nw-empty { padding: 22px 6px; color: var(--text-muted, #9aa0a6); }
 .nw-empty-title { margin-bottom: 6px; font-weight: 600; color: var(--text-normal, #dcddde); }
 .nw-empty-desc { font-size: 12px; line-height: 1.6; }
@@ -155,6 +218,98 @@ const SHELL_SCRIPT = `
 	var bannerMsg = document.getElementById('nw-banner-msg');
 	var bannerActions = document.getElementById('nw-banner-actions');
 	var bannerTimer = null;
+	var picker = document.getElementById('nw-picker');
+	var pickerInput = document.getElementById('nw-picker-input');
+	var pickerList = document.getElementById('nw-picker-list');
+	var pickerItems = [];
+	var pickerCurrent = '';
+	var pickerFiltered = [];
+	var pickerActive = -1;
+	var pickerOpen = false;
+	function pickerName(path) {
+		var base = path.split('/').pop() || path;
+		return base.replace(/\\.md$/i, '');
+	}
+	function closePicker() {
+		if (!picker) return;
+		pickerOpen = false;
+		picker.className = 'nw-picker';
+	}
+	window.__nwHidePicker = closePicker;
+	function setPickerActive(index) {
+		if (!pickerList || !pickerFiltered.length) { pickerActive = -1; return; }
+		if (index < 0) index = pickerFiltered.length - 1;
+		if (index >= pickerFiltered.length) index = 0;
+		pickerActive = index;
+		var nodes = pickerList.querySelectorAll('.nw-picker-item');
+		for (var i = 0; i < nodes.length; i++) {
+			nodes[i].classList.toggle('is-active', i === index);
+		}
+		var active = nodes[index];
+		if (active && active.scrollIntoView) active.scrollIntoView({ block: 'nearest' });
+	}
+	function renderPickerList() {
+		if (!pickerList) return;
+		var query = (pickerInput ? pickerInput.value : '').trim().toLowerCase();
+		pickerFiltered = pickerItems.filter(function (path) {
+			if (!query) return true;
+			return path.toLowerCase().indexOf(query) >= 0 || pickerName(path).toLowerCase().indexOf(query) >= 0;
+		});
+		pickerList.innerHTML = '';
+		pickerActive = -1;
+		if (!pickerFiltered.length) {
+			var empty = document.createElement('div');
+			empty.className = 'nw-picker-empty';
+			empty.textContent = '没有匹配的笔记';
+			pickerList.appendChild(empty);
+			return;
+		}
+		pickerFiltered.forEach(function (path) {
+			var item = document.createElement('div');
+			item.className = 'nw-picker-item' + (path === pickerCurrent ? ' is-current' : '');
+			item.setAttribute('data-nw-path', path);
+			var name = document.createElement('div');
+			name.className = 'nw-picker-name';
+			name.textContent = pickerName(path);
+			item.appendChild(name);
+			var base = path.split('/').pop() || path;
+			var dir = path.slice(0, path.length - base.length).replace(/\\/$/, '');
+			if (dir) {
+				var sub = document.createElement('div');
+				sub.className = 'nw-picker-path';
+				sub.textContent = dir;
+				item.appendChild(sub);
+			}
+			if (path === pickerCurrent) {
+				var badge = document.createElement('span');
+				badge.className = 'nw-picker-badge';
+				badge.textContent = '当前';
+				item.appendChild(badge);
+			}
+			item.addEventListener('mouseenter', function () {
+				setPickerActive(pickerFiltered.indexOf(path));
+			});
+			pickerList.appendChild(item);
+		});
+		setPickerActive(0);
+	}
+	window.__nwShowPicker = function (data) {
+		if (!picker) return;
+		pickerItems = (data && data.notes) || [];
+		pickerCurrent = (data && data.current) || '';
+		if (pickerInput) pickerInput.value = '';
+		pickerOpen = true;
+		picker.className = 'nw-picker is-visible';
+		renderPickerList();
+		if (pickerInput) {
+			pickerInput.focus();
+			pickerInput.select();
+		}
+	};
+	function choosePickerPath(path) {
+		closePicker();
+		send('pick-note', path);
+	}
 	function applyLinks(links) {
 		var next = {};
 		(links || []).forEach(function (href) { next[href] = true; });
@@ -222,6 +377,12 @@ const SHELL_SCRIPT = `
 		return editor ? editor.value : '';
 	};
 	function handleShortcut(ev) {
+		if (pickerOpen && ev.key === 'Escape') {
+			ev.preventDefault();
+			ev.stopPropagation();
+			closePicker();
+			return;
+		}
 		if ((ev.ctrlKey || ev.metaKey) && (ev.key === 's' || ev.key === 'S')) {
 			if (!document.body.classList.contains('nw-mode-edit')) return;
 			ev.preventDefault();
@@ -234,10 +395,47 @@ const SHELL_SCRIPT = `
 		}
 	}
 	if (editor) editor.addEventListener('keydown', handleShortcut);
+	if (pickerInput) {
+		pickerInput.addEventListener('input', function () {
+			if (pickerOpen) renderPickerList();
+		});
+		pickerInput.addEventListener('keydown', function (ev) {
+			if (!pickerOpen) return;
+			if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+				ev.preventDefault();
+				ev.stopPropagation();
+				setPickerActive(pickerActive + (ev.key === 'ArrowDown' ? 1 : -1));
+				return;
+			}
+			if (ev.key === 'Enter') {
+				ev.preventDefault();
+				if (pickerActive >= 0 && pickerFiltered[pickerActive]) choosePickerPath(pickerFiltered[pickerActive]);
+			}
+		});
+	}
+	if (pickerList) {
+		pickerList.addEventListener('click', function (ev) {
+			var item = ev.target && ev.target.closest ? ev.target.closest('[data-nw-path]') : null;
+			if (!item) return;
+			ev.preventDefault();
+			choosePickerPath(item.getAttribute('data-nw-path'));
+		});
+	}
 	document.addEventListener('keydown', handleShortcut, true);
 	document.addEventListener('click', function (ev) {
 		var node = ev.target;
 		if (!node || typeof node.closest !== 'function') return;
+		if (pickerOpen) {
+			if (node.closest('#nw-picker')) return;
+			var pickBtn = node.closest('[data-nw-action="pick"]');
+			if (pickBtn) {
+				ev.preventDefault();
+				ev.stopPropagation();
+				closePicker();
+				return;
+			}
+			closePicker();
+		}
 		var actionEl = node.closest('[data-nw-action]');
 		if (actionEl) {
 			ev.preventDefault();
@@ -302,6 +500,7 @@ const SHELL_SCRIPT = `
 		document.getElementById('nw-root').scrollTop = 0;
 	};
 	window.__nwSetCollapsed = function (collapsed, edge) {
+		if (collapsed) closePicker();
 		document.body.classList.toggle('is-collapsed', !!collapsed);
 		if (collapsed) document.body.setAttribute('data-nw-edge', edge || '');
 		else document.body.removeAttribute('data-nw-edge');
@@ -320,6 +519,7 @@ export function buildShellDocument(): string {
 <body class="nw-body theme-dark">
 <header class="nw-header">
 	<span class="nw-title" id="nw-title">笔记小部件</span>
+	<button class="nw-btn" type="button" data-nw-action="pick" title="选择笔记">${ICON_PICK}</button>
 	<button class="nw-btn" type="button" data-nw-action="edit" title="切换编辑/预览">${ICON_EDIT}</button>
 	<button class="nw-btn nw-btn-save" type="button" data-nw-action="save" title="保存（Ctrl+S）">${ICON_SAVE}</button>
 	<button class="nw-btn" type="button" data-nw-action="open-source" title="打开源文件">${ICON_OPEN_SOURCE}</button>
@@ -328,6 +528,10 @@ export function buildShellDocument(): string {
 	<button class="nw-btn" type="button" data-nw-action="close" title="关闭小部件">${ICON_CLOSE}</button>
 </header>
 <main id="nw-root" class="markdown-preview-view markdown-rendered"></main>
+<div id="nw-picker" class="nw-picker">
+	<input id="nw-picker-input" class="nw-picker-input" type="text" placeholder="搜索笔记（文件名或路径）" spellcheck="false" autocomplete="off" />
+	<div id="nw-picker-list" class="nw-picker-list"></div>
+</div>
 <textarea id="nw-editor" spellcheck="false" placeholder="Markdown 源码"></textarea>
 <div id="nw-banner" class="nw-banner"><span class="nw-banner-msg" id="nw-banner-msg"></span><span class="nw-banner-actions" id="nw-banner-actions"></span></div>
 <script>${SHELL_SCRIPT}</script>

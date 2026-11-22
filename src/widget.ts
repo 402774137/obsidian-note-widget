@@ -389,6 +389,12 @@ export class WidgetWindow {
 			case "open-source":
 				await this.openSourceFile();
 				break;
+			case "pick":
+				await this.showNotePicker();
+				break;
+			case "pick-note":
+				await this.chooseNote(payload);
+				break;
 			case "edit":
 				await this.beginEdit();
 				break;
@@ -491,6 +497,30 @@ export class WidgetWindow {
 			mainWindow.show();
 			mainWindow.focus();
 		}
+	}
+
+	/** 在小部件内弹出笔记选择面板，笔记列表由主窗口提供 */
+	private async showNotePicker(): Promise<void> {
+		const notes = this.plugin.app.vault
+			.getMarkdownFiles()
+			.map((file) => file.path)
+			.sort((a, b) => a.localeCompare(b, "zh"));
+		const current = this.plugin.getTargetFile()?.path ?? this.plugin.settings.notePath;
+		await this.exec(
+			`window.__nwShowPicker && window.__nwShowPicker(${JSON.stringify({ notes, current })})`
+		);
+	}
+
+	/** 选中某条笔记：写入设置并立即切换显示（切换时会退出编辑态、丢弃草稿） */
+	private async chooseNote(path: string): Promise<void> {
+		const file = this.plugin.app.vault.getAbstractFileByPath(path);
+		if (!(file instanceof TFile)) {
+			await this.banner("找不到这条笔记，请刷新后重试", "error");
+			return;
+		}
+		this.plugin.settings.notePath = file.path;
+		await this.plugin.saveSettings();
+		await this.handleTargetChanged();
 	}
 
 	// ---------------------------------------------------------------- 轻量编辑
@@ -626,6 +656,7 @@ export class WidgetWindow {
 			this.editing = false;
 			this.editBaseline = null;
 			await this.exec(`window.__nwSetEditing && window.__nwSetEditing(false)`);
+			await this.exec(`window.__nwSetSource && window.__nwSetSource('')`);
 			await this.banner("目标笔记已变更，已退出编辑");
 		}
 		await this.render();
