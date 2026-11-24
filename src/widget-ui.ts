@@ -493,11 +493,17 @@ const SHELL_SCRIPT = `
 			document.body.classList.add('is-collapsed');
 			if (edge) document.body.setAttribute('data-nw-edge', edge);
 		}
-		document.getElementById('nw-title').textContent = p.title || '笔记小部件';
+		var titleEl = document.getElementById('nw-title');
+		var root = document.getElementById('nw-root');
+		var nextTitle = p.title || '笔记小部件';
+		// 同一笔记的实时刷新保留阅读位置，只有切换笔记时才回到顶部
+		var sameNote = titleEl.textContent === nextTitle;
+		var prevScroll = root.scrollTop;
+		titleEl.textContent = nextTitle;
 		var pin = document.querySelector('[data-nw-action="pin"]');
 		if (pin) pin.classList.toggle('is-active', !!p.pinned);
-		document.getElementById('nw-root').innerHTML = p.html || '';
-		document.getElementById('nw-root').scrollTop = 0;
+		root.innerHTML = p.html || '';
+		root.scrollTop = sameNote ? prevScroll : 0;
 	};
 	window.__nwSetCollapsed = function (collapsed, edge) {
 		if (collapsed) closePicker();

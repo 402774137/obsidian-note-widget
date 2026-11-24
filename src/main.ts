@@ -33,6 +33,12 @@ export default class NoteWidgetPlugin extends Plugin {
 				}
 			})
 		);
+		// 主窗口（含独立弹窗）里正在输入、尚未自动保存时也刷新，做到实时预览
+		this.registerEvent(
+			this.app.workspace.on("editor-change", (_editor, info) => {
+				this.widget.handleEditorChange(info);
+			})
+		);
 		this.registerEvent(
 			this.app.vault.on("rename", (file, oldPath) => {
 				if (oldPath !== this.settings.notePath || !(file instanceof TFile)) return;

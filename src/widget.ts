@@ -1,4 +1,5 @@
 import { MarkdownRenderer, MarkdownView, TFile } from "obsidian";
+import type { MarkdownFileInfo } from "obsidian";
 import type NoteWidgetPlugin from "./main";
 import { buildShellDocument } from "./widget-ui";
 
@@ -117,6 +118,10 @@ export class WidgetWindow {
 	private editBaseline: string | null = null;
 	/** 最近一次渲染所用的 Markdown 原文，用于检测点击勾选前的外部改动 */
 	private lastRenderSource: string | null = null;
+	/** 最近一次渲染对应的笔记路径（切换笔记时即使内容相同也要重绘） */
+	private lastRenderPath: string | null = null;
+	/** 下一次去抖渲染是否强制跳过「内容未变」判断 */
+	private forceRender = false;
 	/** 勾选写回进行中，避免连点造成重复翻转 */
 	private taskBusy = false;
 
@@ -124,7 +129,7 @@ export class WidgetWindow {
 		this.plugin.registerEvent(
 			this.plugin.app.workspace.on("css-change", () => {
 				this.cssCache = null;
-				this.scheduleRender(120);
+				this.scheduleRender(120, true);
 			})
 		);
 	}
@@ -247,34 +252,45 @@ export class WidgetWindow {
 		}
 	}
 
-	scheduleRender(delay = 250): void {
+	scheduleRender(delay = 250, force = false): void {
+		if (force) this.forceRender = true;
 		if (this.renderTimer) window.clearTimeout(this.renderTimer);
 		this.renderTimer = window.setTimeout(() => {
 			this.renderTimer = null;
-			void this.render();
+			const forceNext = this.forceRender;
+			this.forceRender = false;
+			void this.render(forceNext);
 		}, delay);
 	}
 
-	async render(): Promise<void> {
+	/**
+	 * 渲染目标笔记。force=false 时若内容与上次一致就跳过 DOM 更新，
+	 * 避免自身写回（保存、勾选待办）触发的 vault 事件造成重复刷新和闪烁。
+	 */
+	async render(force = false): Promise<void> {
 		const win = this.win;
 		if (!win || win.isDestroyed()) return;
 
 		const token = ++this.renderToken;
 		const file = this.plugin.getTargetFile();
-		let html: string;
+		let html: string | null;
+		let source: string | null;
 		let title: string;
 
 		if (!file) {
-			this.lastRenderSource = null;
 			title = "笔记小部件";
+			source = null;
 			html =
 				`<div class="nw-empty"><div class="nw-empty-title">未选择笔记</div>` +
 				`<div class="nw-empty-desc">打开「设置 → 笔记小部件」，填入笔记路径或点击「选择」从库中挑一条笔记。</div></div>`;
 		} else {
 			title = file.basename;
-			html = await this.renderNoteHtml(file);
+			const body = await this.buildBody(file, force);
+			html = body.html;
+			source = body.source;
 		}
 
+		if (html === null) return;
 		if (token !== this.renderToken) return;
 		if (!this.isOpen()) return;
 
@@ -297,6 +313,54 @@ export class WidgetWindow {
 		} catch {
 			/* 窗口正在关闭 */
 		}
+
+		this.lastRenderSource = source;
+		this.lastRenderPath = file?.path ?? null;
+	}
+
+	/**
+	 * 计算要渲染的 HTML。html 为 null 表示内容没变、无需更新小部件。
+	 */
+	private async buildBody(file: TFile, force: boolean): Promise<{ html: string | null; source: string | null }> {
+		let source: string;
+		try {
+			source = await this.readSource(file);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return {
+				html: `<div class="nw-empty"><div class="nw-empty-title">渲染失败</div><div class="nw-empty-desc">${escapeHtml(message)}</div></div>`,
+				source: null,
+			};
+		}
+		if (!force && source === this.lastRenderSource && this.lastRenderPath === file.path) {
+			return { html: null, source };
+		}
+		return { html: await this.renderNoteHtml(file, source), source };
+	}
+
+	/**
+	 * 目标笔记的当前内容：若它正开在某个标签页（含独立弹窗）里，就以编辑器里的内容为准，
+	 * 这样主窗口还在输入、尚未自动保存时小部件也能实时跟上；否则读磁盘缓存。
+	 */
+	private async readSource(file: TFile): Promise<string> {
+		const live = this.liveEditorSource(file);
+		if (live !== null) return live;
+		return await this.plugin.app.vault.cachedRead(file);
+	}
+
+	private liveEditorSource(file: TFile): string | null {
+		for (const leaf of this.plugin.app.workspace.getLeavesOfType("markdown")) {
+			const view = leaf.view;
+			if (!(view instanceof MarkdownView)) continue;
+			if (view.file?.path !== file.path) continue;
+			try {
+				const value = view.editor.getValue();
+				return typeof value === "string" ? value : null;
+			} catch {
+				return null;
+			}
+		}
+		return null;
 	}
 
 	// ---------------------------------------------------------------- 窗口事件
@@ -337,6 +401,8 @@ export class WidgetWindow {
 		this.editing = false;
 		this.editBaseline = null;
 		this.lastRenderSource = null;
+		this.lastRenderPath = null;
+		this.forceRender = false;
 		this.taskBusy = false;
 		this.cleanupHost();
 
@@ -375,7 +441,7 @@ export class WidgetWindow {
 				await this.setPinned(!this.plugin.settings.alwaysOnTop);
 				break;
 			case "refresh":
-				await this.render();
+				await this.render(true);
 				break;
 			case "close":
 				await this.close();
@@ -555,7 +621,7 @@ export class WidgetWindow {
 		this.editing = false;
 		this.editBaseline = null;
 		await this.exec(`window.__nwSetEditing && window.__nwSetEditing(false)`);
-		await this.render();
+		await this.render(true);
 	}
 
 	/** 从磁盘重新载入原文（用于放弃本地改动） */
@@ -623,7 +689,7 @@ export class WidgetWindow {
 		this.editing = false;
 		this.editBaseline = null;
 		await this.exec(`window.__nwSetEditing && window.__nwSetEditing(false)`);
-		await this.render();
+		await this.render(true);
 		await this.banner("已保存");
 	}
 
@@ -650,6 +716,19 @@ export class WidgetWindow {
 		]);
 	}
 
+	/**
+	 * 主窗口（含独立弹窗）里正在编辑目标笔记：去抖后刷新预览，拿到未保存的实时内容。
+	 * 编辑态下不处理，保持现有的冲突提示逻辑（由 vault modify 触发）。
+	 */
+	handleEditorChange(info: MarkdownFileInfo | null): void {
+		if (!this.isOpen() || this.editing) return;
+		const file = info?.file;
+		if (!(file instanceof TFile)) return;
+		const target = this.plugin.getTargetFile();
+		if (!target || target.path !== file.path) return;
+		this.scheduleRender();
+	}
+
 	/** 目标笔记被切换或删除：退出编辑并刷新渲染 */
 	async handleTargetChanged(): Promise<void> {
 		if (this.editing) {
@@ -659,7 +738,7 @@ export class WidgetWindow {
 			await this.exec(`window.__nwSetSource && window.__nwSetSource('')`);
 			await this.banner("目标笔记已变更，已退出编辑");
 		}
-		await this.render();
+		await this.render(true);
 	}
 
 	// ------------------------------------------------------------------- 任务勾选
@@ -688,7 +767,7 @@ export class WidgetWindow {
 			return;
 		}
 		if (this.lastRenderSource !== null && source !== this.lastRenderSource) {
-			await this.render();
+			await this.render(true);
 			await this.banner("笔记已在别处被修改，已刷新，请重新勾选", "error");
 			return;
 		}
@@ -697,7 +776,7 @@ export class WidgetWindow {
 		const line = lines[lineIndex];
 		const parts = typeof line === "string" ? TASK_LINE_PARTS_RE.exec(line) : null;
 		if (!parts) {
-			await this.render();
+			await this.render(true);
 			await this.banner("没有找到对应的任务行，已刷新", "error");
 			return;
 		}
@@ -723,7 +802,7 @@ export class WidgetWindow {
 		}
 		this.taskBusy = false;
 
-		await this.render();
+		await this.render(true);
 		if (conflict) {
 			await this.banner("笔记已在别处被修改，已刷新，请重新勾选", "error");
 		}
@@ -731,7 +810,7 @@ export class WidgetWindow {
 
 	// ------------------------------------------------------------------- 渲染
 
-	private async renderNoteHtml(file: TFile): Promise<string> {
+	private async renderNoteHtml(file: TFile, source: string): Promise<string> {
 		const app = this.plugin.app;
 		const host = this.getRenderHost();
 		host.empty();
@@ -740,18 +819,13 @@ export class WidgetWindow {
 		host.style.width = `${Math.max(200, windowWidth - 28)}px`;
 
 		try {
-			const markdown = await app.vault.cachedRead(file);
-			this.lastRenderSource = markdown;
-			const taskLines = collectTaskLines(markdown);
-			await MarkdownRenderer.render(app, markdown, host, file.path, this.plugin);
+			const taskLines = collectTaskLines(source);
+			await MarkdownRenderer.render(app, source, host, file.path, this.plugin);
 			// 给 Dataview / Mermaid 之类的异步后处理器一点时间
 			await new Promise<void>((resolve) => window.setTimeout(resolve, 80));
 			this.rewriteLinks(host, file);
 			this.annotateTaskCheckboxes(host, taskLines);
 			return host.innerHTML;
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			return `<div class="nw-empty"><div class="nw-empty-title">渲染失败</div><div class="nw-empty-desc">${escapeHtml(message)}</div></div>`;
 		} finally {
 			host.empty();
 		}
@@ -907,7 +981,7 @@ export class WidgetWindow {
 			settings.width = bounds.width;
 			settings.height = bounds.height;
 			void this.plugin.saveSettings();
-			this.scheduleRender(180);
+			this.scheduleRender(180, true);
 		}, 300);
 	}
 
