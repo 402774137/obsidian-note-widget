@@ -190,10 +190,12 @@ body.is-collapsed #nw-picker { display: none; }
 	text-overflow: ellipsis;
 	font-size: 11px;
 	line-height: 16px;
-	color: var(--text-muted, #9aa0a6);
+	/* 浅色主题用纯黑，深色主题在下方切换为纯白，均为不透明色 */
+	color: #000000;
 	user-select: none;
 	pointer-events: none;
 }
+body.theme-dark .nw-handle-label { color: #ffffff; }
 body.is-collapsed { background: transparent !important; }
 body.is-collapsed .nw-header, body.is-collapsed #nw-root, body.is-collapsed .nw-picker, body.is-collapsed .nw-banner { display: none !important; }
 body.is-collapsed .nw-handle { display: flex; }
