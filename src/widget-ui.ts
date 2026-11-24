@@ -166,10 +166,53 @@ body.is-collapsed #nw-picker { display: none; }
 .nw-empty { padding: 22px 6px; color: var(--text-muted, #9aa0a6); }
 .nw-empty-title { margin-bottom: 6px; font-weight: 600; color: var(--text-normal, #dcddde); }
 .nw-empty-desc { font-size: 12px; line-height: 1.6; }
-/* 收起后只露出很窄的一条触发条：把标题栏涂成强调色作为提示 */
-body.is-collapsed .nw-title, body.is-collapsed .nw-btn { display: none; }
-body.is-collapsed .nw-header { border-bottom: none; background: var(--interactive-accent, #7c3aed); }
-body.is-collapsed #nw-root { visibility: hidden; }
+/* 收起后贴在屏幕边缘的可见薄条：贴住屏幕一侧，另一侧留透明区（窗口本身仍保持系统最小尺寸以上） */
+.nw-handle {
+	position: absolute;
+	z-index: 30;
+	display: none;
+	align-items: center;
+	justify-content: center;
+	gap: 3px;
+	box-sizing: border-box;
+	background: var(--background-secondary, #2a2a2a);
+	border: 1px solid var(--background-modifier-border, rgba(255, 255, 255, 0.12));
+	/* 主题色可能与桌面背景接近，再叠一圈极细的内描边保证边缘可辨 */
+	box-shadow: inset 0 0 0 1px rgba(128, 128, 128, 0.18);
+	overflow: hidden;
+	-webkit-app-region: no-drag;
+}
+.nw-handle-label {
+	display: block;
+	max-width: calc(100% - 10px);
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	font-size: 11px;
+	line-height: 16px;
+	color: var(--text-muted, #9aa0a6);
+	user-select: none;
+	pointer-events: none;
+}
+body.is-collapsed { background: transparent !important; }
+body.is-collapsed .nw-header, body.is-collapsed #nw-root, body.is-collapsed .nw-picker, body.is-collapsed .nw-banner { display: none !important; }
+body.is-collapsed .nw-handle { display: flex; }
+body.is-collapsed .nw-handle:hover { background: var(--background-secondary-alt, var(--background-secondary, #2f2f2f)); }
+/* 可见薄条厚度 20px：贴屏幕一侧铺满，外露的一侧做圆角 */
+body.is-collapsed[data-nw-edge="left"] .nw-handle { top: 0; bottom: 0; left: 0; width: 20px; border-radius: 0 9px 9px 0; border-left: none; }
+body.is-collapsed[data-nw-edge="right"] .nw-handle { top: 0; bottom: 0; right: 0; width: 20px; border-radius: 9px 0 0 9px; border-right: none; }
+body.is-collapsed[data-nw-edge="top"] .nw-handle { left: 0; right: 0; top: 0; height: 20px; border-radius: 0 0 9px 9px; border-top: none; }
+body.is-collapsed[data-nw-edge="bottom"] .nw-handle { left: 0; right: 0; bottom: 0; height: 20px; border-radius: 9px 9px 0 0; border-bottom: none; }
+/* 贴左右时把手竖直，文字旋转 90° 沿边缘方向排布；先按横向布局再旋转，保证文字完整显示 */
+body.is-collapsed[data-nw-edge="left"] .nw-handle-label,
+body.is-collapsed[data-nw-edge="right"] .nw-handle-label {
+	width: 84px;
+	max-width: none;
+	flex: 0 0 auto;
+	text-align: center;
+}
+body.is-collapsed[data-nw-edge="left"] .nw-handle-label { transform: rotate(90deg); }
+body.is-collapsed[data-nw-edge="right"] .nw-handle-label { transform: rotate(-90deg); }
 `;
 
 const SHELL_SCRIPT = `
@@ -447,6 +490,7 @@ export function buildShellDocument(): string {
 	<button class="nw-btn" type="button" data-nw-action="close" title="关闭小部件">${ICON_CLOSE}</button>
 </header>
 <main id="nw-root" class="markdown-preview-view markdown-rendered"></main>
+<div id="nw-handle" class="nw-handle" aria-hidden="true"><span id="nw-handle-label" class="nw-handle-label">Obsidian小部件</span></div>
 <div id="nw-picker" class="nw-picker">
 	<input id="nw-picker-input" class="nw-picker-input" type="text" placeholder="搜索笔记（文件名或路径）" spellcheck="false" autocomplete="off" />
 	<div id="nw-picker-list" class="nw-picker-list"></div>

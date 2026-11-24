@@ -116,7 +116,7 @@ export class NoteWidgetSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("贴边自动隐藏")
-			.setDesc("把窗口拖到屏幕任意一条边后自动收起，只在边缘留一条很窄的触发条；鼠标移入时滑出，移出后收回。")
+			.setDesc("把窗口拖到屏幕任意一条边后自动收起，只在边缘留一个小把手；鼠标移入时滑出，移出后收回。")
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.snapAutoHide).onChange(async (value) => {
 					this.plugin.settings.snapAutoHide = value;

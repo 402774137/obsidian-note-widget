@@ -17,8 +17,12 @@ interface Point {
 
 type SnapEdge = "left" | "right" | "top" | "bottom";
 
-/** 收起后仍露在屏幕内的触发条宽度（DIP） */
-const SLIVER = 6;
+/** 收起后窗口的厚度（垂直于屏幕边缘，DIP）；不小于 Windows 对窗口的最小尺寸，其余部分是透明区 */
+const HANDLE_THICKNESS = 38;
+/** 收起后可见薄条的视觉厚度（垂直于屏幕边缘，DIP）；比窗口更薄，靠透明区补足窗口的最小尺寸 */
+const HANDLE_VISUAL_THICKNESS = 20;
+/** 收起后把手的长度（沿屏幕边缘方向，DIP） */
+const HANDLE_LENGTH = 96;
 /** 判定“贴住边缘”的阈值（DIP） */
 const SNAP_DISTANCE = 16;
 /** 收起状态下鼠标位置轮询间隔 */
@@ -107,6 +111,10 @@ export class WidgetWindow {
 
 	private snapEdge: SnapEdge | null = null;
 	private hidden = false;
+	/** 收起态窗口大部分是透明区，需让鼠标事件穿透；仅在指针位于可见薄条上时恢复交互 */
+	private mouseIgnored = false;
+	/** 收起前完整面板的边界，展开时据此精确恢复，避免反复收展后尺寸漂移 */
+	private expandedBounds: Rect | null = null;
 	/** 收起后，鼠标需先离开触发条一次，才允许再次滑出 */
 	private revealArmed = false;
 	private busy = false;
@@ -160,7 +168,9 @@ export class WidgetWindow {
 			width: bounds.width,
 			height: bounds.height,
 			frame: false,
-			transparent: false,
+			// 收起时窗口会缩成贴边的小把手，圆角外的区域需要透明
+			transparent: true,
+			hasShadow: false,
 			resizable: true,
 			movable: true,
 			minimizable: false,
@@ -168,7 +178,7 @@ export class WidgetWindow {
 			fullscreenable: false,
 			skipTaskbar: false,
 			alwaysOnTop: settings.alwaysOnTop,
-			backgroundColor: this.themeBackground(),
+			backgroundColor: "#00000000",
 			title: WIDGET_TITLE,
 			show: false,
 			webPreferences: {
@@ -230,8 +240,11 @@ export class WidgetWindow {
 		const bounds = win.getBounds();
 		const width = clamp(Math.round(settings.width), 220, 1600);
 		const height = clamp(Math.round(settings.height), 180, 1600);
-		if (Math.abs(bounds.width - width) > 4 || Math.abs(bounds.height - height) > 4) {
-			win.setSize(width, height);
+		// 收起态窗口就是把手大小，不能按设置里的宽高去撑大，等展开时再恢复
+		if (!this.hidden && !this.busy) {
+			if (Math.abs(bounds.width - width) > 4 || Math.abs(bounds.height - height) > 4) {
+				win.setSize(width, height);
+			}
 		}
 
 		void this.exec(
@@ -241,10 +254,7 @@ export class WidgetWindow {
 		if (!settings.snapAutoHide) {
 			this.stopHoverWatch();
 			this.snapEdge = null;
-			if (this.hidden) {
-				this.hidden = false;
-				void this.exec("window.__nwSetCollapsed && window.__nwSetCollapsed(false)");
-			}
+			if (this.hidden) void this.restoreExpanded();
 		}
 	}
 
@@ -392,6 +402,8 @@ export class WidgetWindow {
 		this.injectedCss = null;
 		this.snapEdge = null;
 		this.hidden = false;
+		this.mouseIgnored = false;
+		this.expandedBounds = null;
 		this.revealArmed = false;
 		this.busy = false;
 		this.lastRenderSource = null;
@@ -685,7 +697,12 @@ export class WidgetWindow {
 		const host = this.getRenderHost();
 		host.empty();
 
-		const windowWidth = this.isOpen() ? this.win.getBounds().width : this.plugin.settings.width;
+		// 收起态窗口只有把手大小，渲染宽度仍按完整面板计算，避免内容被挤窄
+		const windowWidth = this.hidden
+			? this.plugin.settings.width
+			: this.isOpen()
+				? this.win.getBounds().width
+				: this.plugin.settings.width;
 		host.style.width = `${Math.max(200, windowWidth - 28)}px`;
 
 		try {
@@ -781,11 +798,6 @@ export class WidgetWindow {
 		return document.body.classList.contains("theme-light") ? "theme-light" : "theme-dark";
 	}
 
-	private themeBackground(): string {
-		const color = getComputedStyle(document.body).backgroundColor;
-		return color && color !== "rgba(0, 0, 0, 0)" && color !== "transparent" ? color : "#1e1e1e";
-	}
-
 	// ------------------------------------------------------------------- 布局
 
 	private initialBounds(): Rect {
@@ -830,7 +842,7 @@ export class WidgetWindow {
 	}
 
 	private async afterUserMove(): Promise<void> {
-		if (!this.isOpen() || this.hidden) return;
+		if (!this.isOpen() || this.hidden || this.busy) return;
 		this.savePosition();
 		if (!this.plugin.settings.snapAutoHide) return;
 		const edge = this.detectEdge();
@@ -843,7 +855,8 @@ export class WidgetWindow {
 		if (this.resizeTimer) window.clearTimeout(this.resizeTimer);
 		this.resizeTimer = window.setTimeout(() => {
 			this.resizeTimer = null;
-			if (!this.isOpen()) return;
+			// 收起态窗口是把手大小，不能把尺寸写回设置
+			if (!this.isOpen() || this.hidden || this.busy) return;
 			const bounds = this.win.getBounds();
 			const settings = this.plugin.settings;
 			// 忽略 DPI 舍入带来的 1~3px 抖动，避免设置里记录的尺寸被逐步放大
@@ -926,18 +939,98 @@ export class WidgetWindow {
 		return { x: bounds.x, y: bounds.y };
 	}
 
-	private hiddenPosition(edge: SnapEdge, bounds: Rect, workArea: Rect): Point {
+	/** 收起后把手在屏幕边缘的矩形：贴左右是竖直窄条，贴上/下是水平窄条 */
+	private handleRect(edge: SnapEdge, expanded: Rect, workArea: Rect): Rect {
+		const centerX = Math.round(expanded.x + (expanded.width - HANDLE_LENGTH) / 2);
+		const centerY = Math.round(expanded.y + (expanded.height - HANDLE_LENGTH) / 2);
 		switch (edge) {
 			case "left":
-				return { x: workArea.x - bounds.width + SLIVER, y: bounds.y };
+				return {
+					x: workArea.x,
+					y: clamp(centerY, workArea.y, workArea.y + workArea.height - HANDLE_LENGTH),
+					width: HANDLE_THICKNESS,
+					height: HANDLE_LENGTH,
+				};
 			case "right":
-				return { x: workArea.x + workArea.width - SLIVER, y: bounds.y };
+				return {
+					x: workArea.x + workArea.width - HANDLE_THICKNESS,
+					y: clamp(centerY, workArea.y, workArea.y + workArea.height - HANDLE_LENGTH),
+					width: HANDLE_THICKNESS,
+					height: HANDLE_LENGTH,
+				};
 			case "top":
-				return { x: bounds.x, y: workArea.y - bounds.height + SLIVER };
+				return {
+					x: clamp(centerX, workArea.x, workArea.x + workArea.width - HANDLE_LENGTH),
+					y: workArea.y,
+					width: HANDLE_LENGTH,
+					height: HANDLE_THICKNESS,
+				};
 			case "bottom":
-				return { x: bounds.x, y: workArea.y + workArea.height - SLIVER };
+				return {
+					x: clamp(centerX, workArea.x, workArea.x + workArea.width - HANDLE_LENGTH),
+					y: workArea.y + workArea.height - HANDLE_THICKNESS,
+					width: HANDLE_LENGTH,
+					height: HANDLE_THICKNESS,
+				};
 		}
-		return { x: bounds.x, y: bounds.y };
+		return { x: expanded.x, y: expanded.y, width: HANDLE_THICKNESS, height: HANDLE_LENGTH };
+	}
+
+	/** 收起后可见薄条的矩形（屏幕坐标）：贴着屏幕边缘，比窗口薄，其余留给透明区 */
+	private barRect(edge: SnapEdge, handle: Rect): Rect {
+		switch (edge) {
+			case "left":
+				return { x: handle.x, y: handle.y, width: HANDLE_VISUAL_THICKNESS, height: handle.height };
+			case "right":
+				return {
+					x: handle.x + handle.width - HANDLE_VISUAL_THICKNESS,
+					y: handle.y,
+					width: HANDLE_VISUAL_THICKNESS,
+					height: handle.height,
+				};
+			case "top":
+				return { x: handle.x, y: handle.y, width: handle.width, height: HANDLE_VISUAL_THICKNESS };
+			case "bottom":
+				return {
+					x: handle.x,
+					y: handle.y + handle.height - HANDLE_VISUAL_THICKNESS,
+					width: handle.width,
+					height: HANDLE_VISUAL_THICKNESS,
+				};
+		}
+		return { x: handle.x, y: handle.y, width: handle.width, height: HANDLE_VISUAL_THICKNESS };
+	}
+
+	/**
+	 * 设置窗口是否忽略鼠标事件。忽略时透明区才真正点击穿透；
+	 * forward 让 Chromium 仍能收到 mousemove，便于边缘状态判断（实际检测以轮询为准）。
+	 */
+	private setMouseIgnored(ignore: boolean): void {
+		const win = this.win;
+		if (!win || win.isDestroyed()) return;
+		if (this.mouseIgnored === ignore) return;
+		this.mouseIgnored = ignore;
+		try {
+			if (ignore) win.setIgnoreMouseEvents(true, { forward: true });
+			else win.setIgnoreMouseEvents(false);
+		} catch {
+			/* 窗口可能已经销毁 */
+		}
+	}
+
+	/** 展开后的完整面板矩形：位置用收起前记录的位置，尺寸用设置里的宽高 */
+	private expandedRect(): Rect {
+		const settings = this.plugin.settings;
+		const width = clamp(Math.round(settings.width), 220, 1600);
+		const height = clamp(Math.round(settings.height), 180, 1600);
+		const stored = this.expandedBounds;
+		const bounds = this.win.getBounds();
+		let x = stored ? stored.x : (settings.x ?? bounds.x);
+		let y = stored ? stored.y : (settings.y ?? bounds.y);
+		const workArea = this.workArea({ x, y, width, height });
+		x = clamp(x, workArea.x, workArea.x + workArea.width - width);
+		y = clamp(y, workArea.y, workArea.y + workArea.height - height);
+		return { x, y, width, height };
 	}
 
 	private async collapseToEdge(edge: SnapEdge): Promise<void> {
@@ -949,36 +1042,49 @@ export class WidgetWindow {
 			this.snapEdge = edge;
 
 			const flush = this.flushBounds(edge, bounds, workArea);
-			await this.animateTo(flush, 120);
+			const expanded: Rect = {
+				x: flush.x,
+				y: flush.y,
+				width: clamp(Math.round(this.plugin.settings.width), 220, 1600),
+				height: clamp(Math.round(this.plugin.settings.height), 180, 1600),
+			};
+			this.expandedBounds = expanded;
+			await this.animateBounds(expanded, 120);
 
-			// 记住“贴着边但完整可见”的位置，下次启动据此恢复
+			// 记住“贴着边但完整可见”的位置，下次启动据此恢复（不记录把手尺寸）
 			this.plugin.settings.x = flush.x;
 			this.plugin.settings.y = flush.y;
 			void this.plugin.saveSettings();
 
-			const target = this.hiddenPosition(edge, bounds, workArea);
-			await this.animateTo(target, 170);
-			this.hidden = true;
-			this.revealArmed = false;
-			await this.exec(`window.__nwSetCollapsed && window.__nwSetCollapsed(true, '${edge}')`);
-			this.startHoverWatch();
+			await this.shrinkToHandle(edge, expanded, workArea);
 		} finally {
 			this.busy = false;
 		}
+	}
+
+	/** 切换到收起外观并把窗口缩成贴边把手 */
+	private async shrinkToHandle(edge: SnapEdge, expanded: Rect, workArea: Rect): Promise<void> {
+		await this.exec(`window.__nwSetCollapsed && window.__nwSetCollapsed(true, '${edge}')`);
+		await this.animateBounds(this.handleRect(edge, expanded, workArea), 170);
+		this.hidden = true;
+		this.revealArmed = false;
+		// 收起后窗口大部分是透明区：先按忽略处理，鼠标若停在薄条上，下次轮询会恢复正常交互
+		this.setMouseIgnored(true);
+		this.startHoverWatch();
 	}
 
 	private async expand(): Promise<void> {
 		if (!this.isOpen() || this.busy || !this.snapEdge) return;
 		this.busy = true;
 		try {
-			await this.exec("window.__nwSetCollapsed && window.__nwSetCollapsed(false)");
-			const bounds = this.win.getBounds();
-			const workArea = this.workArea(bounds);
-			const flush = this.flushBounds(this.snapEdge, bounds, workArea);
-			this.hidden = false;
+			// 展开后必须是可交互的完整面板，先恢复鼠标事件
+			this.setMouseIgnored(false);
+			const target = this.expandedRect();
 			this.outsideTicks = 0;
+			await this.animateBounds(target, 150);
+			this.hidden = false;
 			this.revealArmed = true;
-			await this.animateTo(flush, 150);
+			await this.exec("window.__nwSetCollapsed && window.__nwSetCollapsed(false)");
 		} finally {
 			this.busy = false;
 		}
@@ -988,13 +1094,27 @@ export class WidgetWindow {
 		if (!this.isOpen() || this.busy || !this.snapEdge) return;
 		this.busy = true;
 		try {
+			// 以当前实际位置为准，避免面板位置变过之后把手仍按旧边界居中
 			const bounds = this.win.getBounds();
 			const workArea = this.workArea(bounds);
-			const target = this.hiddenPosition(this.snapEdge, bounds, workArea);
-			await this.animateTo(target, 170);
-			this.hidden = true;
+			const expanded: Rect = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
+			this.expandedBounds = expanded;
+			await this.shrinkToHandle(this.snapEdge, expanded, workArea);
+		} finally {
+			this.busy = false;
+		}
+	}
+
+	/** 关闭“贴边自动隐藏”后，从把手恢复成完整面板 */
+	private async restoreExpanded(): Promise<void> {
+		if (!this.isOpen() || this.busy) return;
+		this.busy = true;
+		try {
+			this.setMouseIgnored(false);
+			await this.animateBounds(this.expandedRect(), 150);
+			this.hidden = false;
 			this.revealArmed = false;
-			await this.exec(`window.__nwSetCollapsed && window.__nwSetCollapsed(true, '${this.snapEdge}')`);
+			await this.exec("window.__nwSetCollapsed && window.__nwSetCollapsed(false)");
 		} finally {
 			this.busy = false;
 		}
@@ -1029,7 +1149,10 @@ export class WidgetWindow {
 		if (!point) return;
 
 		if (this.hidden) {
-			const inside = this.pointInRect(point, this.triggerRect(this.snapEdge));
+			// 只认可见薄条，透明区继续穿透桌面；指针压到薄条上才恢复交互
+			const bar = this.inflateRect(this.barRect(this.snapEdge, this.win.getBounds()), 1);
+			const inside = this.pointInRect(point, bar);
+			this.setMouseIgnored(!inside);
 			// 刚收起时鼠标通常还压在窗口上，先等它离开一次，避免立刻又滑出
 			if (!this.revealArmed) {
 				if (!inside) this.revealArmed = true;
@@ -1039,6 +1162,7 @@ export class WidgetWindow {
 			return;
 		}
 
+		if (this.mouseIgnored) this.setMouseIgnored(false);
 		if (this.pointInRect(point, this.inflateRect(this.win.getBounds(), 10))) {
 			this.outsideTicks = 0;
 			return;
@@ -1047,32 +1171,6 @@ export class WidgetWindow {
 		if (this.outsideTicks >= LEAVE_TICKS) {
 			this.outsideTicks = 0;
 			void this.collapseAgain();
-		}
-	}
-
-	private triggerRect(edge: SnapEdge): Rect {
-		const bounds = this.win.getBounds();
-		const workArea = this.workArea(bounds);
-		const thickness = SLIVER + 6;
-		switch (edge) {
-			case "left":
-				return { x: workArea.x, y: bounds.y, width: thickness, height: bounds.height };
-			case "right":
-				return {
-					x: workArea.x + workArea.width - thickness,
-					y: bounds.y,
-					width: thickness,
-					height: bounds.height,
-				};
-			case "top":
-				return { x: bounds.x, y: workArea.y, width: bounds.width, height: thickness };
-			case "bottom":
-				return {
-					x: bounds.x,
-					y: workArea.y + workArea.height - thickness,
-					width: bounds.width,
-					height: thickness,
-				};
 		}
 	}
 
@@ -1101,46 +1199,46 @@ export class WidgetWindow {
 		return { x: point.x, y: point.y };
 	}
 
-	private async animateTo(target: Point, duration: number): Promise<void> {
+	/** 同时缓动位置和尺寸（收起时缩小成把手，展开时恢复完整面板） */
+	private async animateBounds(target: Rect, duration: number): Promise<void> {
 		const win = this.win;
 		if (!win || win.isDestroyed()) return;
-		if (!target || !Number.isFinite(target.x) || !Number.isFinite(target.y)) {
-			console.warn("[note-widget] 忽略无效的窗口位置", target);
+		if (
+			!target ||
+			![target.x, target.y, target.width, target.height].every((value) => Number.isFinite(value)) ||
+			target.width <= 0 ||
+			target.height <= 0
+		) {
+			console.warn("[note-widget] 忽略无效的窗口边界", target);
 			return;
 		}
 
-		// 同一时间只保留一个位移动画
+		// 同一时间只保留一个窗口动画
 		if (this.animTimer) {
 			window.clearTimeout(this.animTimer);
 			this.animTimer = null;
 		}
 
-		let startX = 0;
-		let startY = 0;
+		let start: Rect;
 		try {
-			const position = win.getPosition();
-			startX = Number(position?.[0]);
-			startY = Number(position?.[1]);
+			start = win.getBounds();
 		} catch {
 			return;
 		}
-		if (!Number.isFinite(startX) || !Number.isFinite(startY)) return;
+		if (![start.x, start.y, start.width, start.height].every((value) => Number.isFinite(value))) return;
 
-		// 位移时一并固定窗口尺寸（取设置里的目标值），避免 DPI 舍入让窗口逐步变大
-		const settings = this.plugin.settings;
-		let frameWidth = clamp(Math.round(settings.width), 220, 1600);
-		let frameHeight = clamp(Math.round(settings.height), 180, 1600);
-		if (!Number.isFinite(frameWidth) || !Number.isFinite(frameHeight)) {
-			try {
-				const bounds = win.getBounds();
-				frameWidth = bounds.width;
-				frameHeight = bounds.height;
-			} catch {
-				return;
-			}
+		const endX = Math.round(target.x);
+		const endY = Math.round(target.y);
+		const endWidth = Math.max(1, Math.round(target.width));
+		const endHeight = Math.max(1, Math.round(target.height));
+		if (
+			Math.abs(start.x - endX) < 1 &&
+			Math.abs(start.y - endY) < 1 &&
+			Math.abs(start.width - endWidth) < 1 &&
+			Math.abs(start.height - endHeight) < 1
+		) {
+			return;
 		}
-		if (!Number.isFinite(frameWidth) || !Number.isFinite(frameHeight) || frameWidth <= 0 || frameHeight <= 0) return;
-		if (Math.abs(startX - target.x) < 1 && Math.abs(startY - target.y) < 1) return;
 
 		this.suppressUntil = Date.now() + duration + 600;
 		const startedAt = Date.now();
@@ -1154,14 +1252,16 @@ export class WidgetWindow {
 				}
 				const progress = Math.min(1, (Date.now() - startedAt) / duration);
 				const eased = 1 - Math.pow(1 - progress, 3);
-				const x = Math.round(startX + (target.x - startX) * eased);
-				const y = Math.round(startY + (target.y - startY) * eased);
+				const x = Math.round(start.x + (endX - start.x) * eased);
+				const y = Math.round(start.y + (endY - start.y) * eased);
+				const width = Math.round(start.width + (endWidth - start.width) * eased);
+				const height = Math.round(start.height + (endHeight - start.height) * eased);
 				try {
-					// 注意：不能用 setPosition —— Electron 在 Windows 上对有边框样式的无边框窗口
-					// 每次 setPosition 都会因 DPI 舍入把窗口撑大，这里固定尺寸一起设置
-					this.win.setBounds({ x, y, width: frameWidth, height: frameHeight }, false);
+					// 位置和尺寸一起设置：Electron 在 Windows 上对无边框窗口单独 setPosition
+					// 会因 DPI 舍入把窗口撑大，合并成一次 setBounds 可以避免尺寸漂移
+					this.win.setBounds({ x, y, width, height }, false);
 				} catch (error) {
-					console.warn("[note-widget] 移动窗口失败", error);
+					console.warn("[note-widget] 调整窗口边界失败", error);
 					resolve();
 					return;
 				}
