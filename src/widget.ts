@@ -112,10 +112,6 @@ export class WidgetWindow {
 	private busy = false;
 	private outsideTicks = 0;
 	private preserveVisibleState = false;
-	/** 是否处于 Markdown 源码编辑模式 */
-	private editing = false;
-	/** 进入编辑模式时磁盘上的原文，用于检测外部修改 */
-	private editBaseline: string | null = null;
 	/** 最近一次渲染所用的 Markdown 原文，用于检测点击勾选前的外部改动 */
 	private lastRenderSource: string | null = null;
 	/** 最近一次渲染对应的笔记路径（切换笔记时即使内容相同也要重绘） */
@@ -398,8 +394,6 @@ export class WidgetWindow {
 		this.hidden = false;
 		this.revealArmed = false;
 		this.busy = false;
-		this.editing = false;
-		this.editBaseline = null;
 		this.lastRenderSource = null;
 		this.lastRenderPath = null;
 		this.forceRender = false;
@@ -452,30 +446,14 @@ export class WidgetWindow {
 			case "external":
 				this.openExternal(payload);
 				break;
-			case "open-source":
-				await this.openSourceFile();
+			case "edit":
+				await this.openInEditor();
 				break;
 			case "pick":
 				await this.showNotePicker();
 				break;
 			case "pick-note":
 				await this.chooseNote(payload);
-				break;
-			case "edit":
-				await this.beginEdit();
-				break;
-			case "cancel":
-			case "view":
-				await this.exitEdit();
-				break;
-			case "save":
-				await this.saveDraft(false);
-				break;
-			case "force-save":
-				await this.saveDraft(true);
-				break;
-			case "reload":
-				await this.reloadSource();
 				break;
 			case "task":
 				await this.toggleTask(payload);
@@ -527,9 +505,10 @@ export class WidgetWindow {
 	}
 
 	/**
-	 * 在主窗口打开目标笔记：已打开则复用标签，没有就新开一个，并把主窗口带到前台。
+	 * 编辑入口：在主窗口打开目标笔记并切到可编辑的源码模式，然后把主窗口带到前台。
+	 * 已打开则复用标签，没有就新开一个。
 	 */
-	private async openSourceFile(): Promise<void> {
+	private async openInEditor(): Promise<void> {
 		const file = this.plugin.getTargetFile();
 		if (!file) {
 			await this.banner("未找到目标笔记，请先在设置中选择", "error");
@@ -555,7 +534,20 @@ export class WidgetWindow {
 				return;
 			}
 		}
-		workspace.setActiveLeaf(leaf, { focus: true });
+		const view = leaf.view as MarkdownView;
+		// 阅读模式不可输入，切回编辑（源码）模式；已在编辑模式则保持原样，避免重建视图
+		const viewState = leaf.getViewState();
+		if (!viewState.state || viewState.state.mode !== "source") {
+			try {
+				await leaf.setViewState({
+					type: "markdown",
+					state: Object.assign({}, viewState.state, { file: file.path, mode: "source" }),
+				});
+			} catch {
+				await this.banner("切换编辑模式失败", "error");
+				return;
+			}
+		}
 
 		const mainWindow = getRemote()?.getCurrentWindow?.();
 		if (mainWindow && !mainWindow.isDestroyed()) {
@@ -563,6 +555,8 @@ export class WidgetWindow {
 			mainWindow.show();
 			mainWindow.focus();
 		}
+		workspace.setActiveLeaf(leaf, { focus: true });
+		(leaf.view as MarkdownView).editor?.focus();
 	}
 
 	/** 在小部件内弹出笔记选择面板，笔记列表由主窗口提供 */
@@ -577,7 +571,7 @@ export class WidgetWindow {
 		);
 	}
 
-	/** 选中某条笔记：写入设置并立即切换显示（切换时会退出编辑态、丢弃草稿） */
+	/** 选中某条笔记：写入设置并立即切换显示 */
 	private async chooseNote(path: string): Promise<void> {
 		const file = this.plugin.app.vault.getAbstractFileByPath(path);
 		if (!(file instanceof TFile)) {
@@ -589,139 +583,22 @@ export class WidgetWindow {
 		await this.handleTargetChanged();
 	}
 
-	// ---------------------------------------------------------------- 轻量编辑
+	// --------------------------------------------------------------- 提示条
 
-	private async banner(message: string, kind: "info" | "error" = "info", buttons: Array<{ label: string; action: string }> = []): Promise<void> {
-		await this.exec(`window.__nwBanner && window.__nwBanner(${JSON.stringify(message)}, ${JSON.stringify(kind)}, ${JSON.stringify(buttons)})`);
+	private async banner(message: string, kind: "info" | "error" = "info"): Promise<void> {
+		await this.exec(`window.__nwBanner && window.__nwBanner(${JSON.stringify(message)}, ${JSON.stringify(kind)})`);
 	}
 
-	/** 进入源码编辑：从磁盘读取原文，作为冲突检测基准 */
-	private async beginEdit(): Promise<void> {
-		const file = this.plugin.getTargetFile();
-		if (!file) {
-			await this.banner("未找到目标笔记，请先在设置中选择", "error");
-			return;
-		}
-		let source: string;
-		try {
-			source = await this.plugin.app.vault.read(file);
-		} catch {
-			await this.banner("读取笔记失败", "error");
-			return;
-		}
-		this.editing = true;
-		this.editBaseline = source;
-		await this.exec(`window.__nwSetSource && window.__nwSetSource(${JSON.stringify(source)})`);
-		await this.exec(`window.__nwSetEditing && window.__nwSetEditing(true)`);
-		await this.exec(`(function(){var e=document.getElementById('nw-editor');if(e)e.focus();})()`);
-	}
-
-	/** 退出编辑（丢弃草稿），回到渲染模式 */
-	private async exitEdit(): Promise<void> {
-		this.editing = false;
-		this.editBaseline = null;
-		await this.exec(`window.__nwSetEditing && window.__nwSetEditing(false)`);
-		await this.render(true);
-	}
-
-	/** 从磁盘重新载入原文（用于放弃本地改动） */
-	private async reloadSource(): Promise<void> {
-		const file = this.plugin.getTargetFile();
-		if (!file) {
-			await this.banner("未找到目标笔记", "error");
-			return;
-		}
-		let source: string;
-		try {
-			source = await this.plugin.app.vault.read(file);
-		} catch {
-			await this.banner("读取笔记失败", "error");
-			return;
-		}
-		this.editing = true;
-		this.editBaseline = source;
-		await this.exec(`window.__nwSetSource && window.__nwSetSource(${JSON.stringify(source)})`);
-		await this.exec(`window.__nwSetEditing && window.__nwSetEditing(true)`);
-		await this.banner("已重新载入笔记原文");
-	}
-
-	/**
-	 * 保存草稿。force=false 时若发现笔记在编辑期间被别处修改，则拒绝覆盖并提示。
-	 */
-	private async saveDraft(force: boolean): Promise<void> {
-		if (!this.editing) return;
-		const file = this.plugin.getTargetFile();
-		if (!file) {
-			await this.banner("未找到目标笔记", "error");
-			return;
-		}
-		const draft = await this.execValue(`window.__nwGetSource ? window.__nwGetSource() : null`);
-		if (typeof draft !== "string") {
-			await this.banner("读取编辑内容失败", "error");
-			return;
-		}
-		if (draft === this.editBaseline) {
-			await this.exitEdit();
-			await this.banner("没有需要保存的改动");
-			return;
-		}
-		let current: string;
-		try {
-			current = await this.plugin.app.vault.read(file);
-		} catch {
-			await this.banner("读取笔记失败", "error");
-			return;
-		}
-		if (!force && this.editBaseline !== null && current !== this.editBaseline && current !== draft) {
-			await this.banner("笔记已在其他窗口被修改，未保存以免覆盖", "error", [
-				{ label: "重新载入", action: "reload" },
-				{ label: "仍然覆盖", action: "force-save" },
-			]);
-			return;
-		}
-		this.editBaseline = draft;
-		try {
-			await this.plugin.app.vault.modify(file, draft);
-		} catch {
-			await this.banner("保存失败，请检查文件权限", "error");
-			return;
-		}
-		this.editing = false;
-		this.editBaseline = null;
-		await this.exec(`window.__nwSetEditing && window.__nwSetEditing(false)`);
-		await this.render(true);
-		await this.banner("已保存");
-	}
-
-	/**
-	 * 目标笔记被修改时的入口：编辑中只做冲突提示，不覆盖草稿；否则刷新渲染。
-	 */
-	async handleVaultChange(): Promise<void> {
-		if (!this.editing) {
-			this.scheduleRender();
-			return;
-		}
-		const file = this.plugin.getTargetFile();
-		if (!file || this.editBaseline === null) return;
-		let current: string;
-		try {
-			current = await this.plugin.app.vault.read(file);
-		} catch {
-			return;
-		}
-		if (current === this.editBaseline) return;
-		await this.banner("笔记已在其他窗口被修改，你的草稿尚未保存", "error", [
-			{ label: "重新载入", action: "reload" },
-			{ label: "仍然覆盖", action: "force-save" },
-		]);
+	/** 目标笔记内容变化：去抖刷新渲染（内容未变时自动跳过） */
+	handleVaultChange(): void {
+		this.scheduleRender();
 	}
 
 	/**
 	 * 主窗口（含独立弹窗）里正在编辑目标笔记：去抖后刷新预览，拿到未保存的实时内容。
-	 * 编辑态下不处理，保持现有的冲突提示逻辑（由 vault modify 触发）。
 	 */
 	handleEditorChange(info: MarkdownFileInfo | null): void {
-		if (!this.isOpen() || this.editing) return;
+		if (!this.isOpen()) return;
 		const file = info?.file;
 		if (!(file instanceof TFile)) return;
 		const target = this.plugin.getTargetFile();
@@ -729,15 +606,8 @@ export class WidgetWindow {
 		this.scheduleRender();
 	}
 
-	/** 目标笔记被切换或删除：退出编辑并刷新渲染 */
+	/** 目标笔记被切换或删除：重新渲染 */
 	async handleTargetChanged(): Promise<void> {
-		if (this.editing) {
-			this.editing = false;
-			this.editBaseline = null;
-			await this.exec(`window.__nwSetEditing && window.__nwSetEditing(false)`);
-			await this.exec(`window.__nwSetSource && window.__nwSetSource('')`);
-			await this.banner("目标笔记已变更，已退出编辑");
-		}
 		await this.render(true);
 	}
 
@@ -749,7 +619,7 @@ export class WidgetWindow {
 	 * 若笔记在渲染后被别处改过，只刷新并提示，不覆盖。
 	 */
 	private async toggleTask(payload: string): Promise<void> {
-		if (this.editing || this.taskBusy) return;
+		if (this.taskBusy) return;
 		const lineIndex = Number(payload);
 		if (!Number.isInteger(lineIndex) || lineIndex < 0) return;
 
@@ -1320,16 +1190,6 @@ export class WidgetWindow {
 			await this.win.webContents.executeJavaScript(script, true);
 		} catch {
 			/* 忽略窗口关闭过程中的执行失败 */
-		}
-	}
-
-	/** 执行脚本并取回结果（用于读取编辑框内容） */
-	private async execValue(script: string): Promise<unknown> {
-		if (!this.isOpen()) return null;
-		try {
-			return await this.win.webContents.executeJavaScript(script, true);
-		} catch {
-			return null;
 		}
 	}
 }

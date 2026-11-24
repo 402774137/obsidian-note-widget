@@ -7,12 +7,10 @@ const ICON_PIN = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17v5"
 const ICON_REFRESH = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v5h-5"/></svg>`;
 const ICON_CLOSE = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`;
 const ICON_EDIT = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>`;
-const ICON_SAVE = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`;
-const ICON_OPEN_SOURCE = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>`;
 const ICON_PICK = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>`;
 
 const CHROME_CSS = `
-:root { --nw-header-height: 26px; }
+:root { --nw-header-height: 30px; }
 html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
 body.nw-body {
 	padding: 0;
@@ -52,8 +50,8 @@ body.nw-body {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 22px;
-	height: 20px;
+	width: 26px;
+	height: 24px;
 	margin-left: 1px;
 	padding: 0;
 	border: none;
@@ -65,30 +63,7 @@ body.nw-body {
 }
 .nw-btn:hover { background: var(--background-modifier-hover, rgba(255, 255, 255, 0.08)); color: var(--text-normal, #dcddde); }
 .nw-btn.is-active { color: var(--interactive-accent, #7c3aed); }
-.nw-btn svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.nw-btn-save { display: none; }
-body.nw-mode-edit .nw-btn-save { display: inline-flex; color: var(--interactive-accent, #7c3aed); }
-#nw-editor {
-	display: none;
-	box-sizing: border-box;
-	width: 100%;
-	height: calc(100% - var(--nw-header-height));
-	margin: 0;
-	padding: 10px 12px 18px;
-	border: none;
-	outline: none;
-	resize: none;
-	background-color: var(--background-primary, #1e1e1e);
-	color: var(--text-normal, #dcddde);
-	font-family: var(--font-monospace, "Cascadia Mono", Consolas, monospace);
-	font-size: 12.5px;
-	line-height: 1.65;
-	tab-size: 4;
-	white-space: pre-wrap;
-	overflow-y: auto;
-}
-body.nw-mode-edit #nw-editor { display: block; }
-body.nw-mode-edit #nw-root { display: none; }
+.nw-btn svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .nw-banner {
 	position: fixed;
 	left: 8px;
@@ -110,18 +85,6 @@ body.nw-mode-edit #nw-root { display: none; }
 .nw-banner.is-visible { display: flex; }
 .nw-banner.is-error { background: var(--background-modifier-error, #8b2f2f); }
 .nw-banner-msg { flex: 1 1 auto; min-width: 0; }
-.nw-banner-actions { flex: 0 0 auto; display: flex; gap: 6px; }
-.nw-banner-btn {
-	flex: 0 0 auto;
-	padding: 2px 7px;
-	border: 1px solid rgba(255, 255, 255, 0.45);
-	border-radius: 4px;
-	background: transparent;
-	color: inherit;
-	font-size: 11.5px;
-	cursor: pointer;
-}
-.nw-banner-btn:hover { background: rgba(255, 255, 255, 0.16); }
 #nw-root {
 	box-sizing: border-box;
 	height: calc(100% - var(--nw-header-height));
@@ -213,10 +176,8 @@ const SHELL_SCRIPT = `
 (function () {
 	var seq = 0;
 	var currentLinks = {};
-	var editor = document.getElementById('nw-editor');
 	var banner = document.getElementById('nw-banner');
 	var bannerMsg = document.getElementById('nw-banner-msg');
-	var bannerActions = document.getElementById('nw-banner-actions');
 	var bannerTimer = null;
 	var picker = document.getElementById('nw-picker');
 	var pickerInput = document.getElementById('nw-picker-input');
@@ -333,68 +294,27 @@ const SHELL_SCRIPT = `
 		seq += 1;
 		document.title = 'nw-action:' + kind + ':' + seq + ':' + encodeURIComponent(payload == null ? '' : String(payload));
 	}
-	function syncEditing(on) {
-		document.body.classList.toggle('nw-mode-edit', !!on);
-		var btn = document.querySelector('[data-nw-action="edit"]');
-		if (btn) btn.classList.toggle('is-active', !!on);
-	}
 	window.__nwHideBanner = function () {
 		if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
 		if (!banner) return;
 		banner.className = 'nw-banner';
-		if (bannerActions) bannerActions.innerHTML = '';
 	};
-	window.__nwBanner = function (msg, kind, buttons) {
+	window.__nwBanner = function (msg, kind) {
 		if (!banner) return;
 		window.__nwHideBanner();
 		banner.className = 'nw-banner is-visible' + (kind ? ' is-' + kind : '');
 		if (bannerMsg) bannerMsg.textContent = msg || '';
-		(buttons || []).forEach(function (item) {
-			var btn = document.createElement('button');
-			btn.type = 'button';
-			btn.className = 'nw-banner-btn';
-			btn.textContent = item.label;
-			btn.addEventListener('click', function () {
-				window.__nwHideBanner();
-				send(item.action, item.payload || '');
-			});
-			bannerActions.appendChild(btn);
-		});
 		if (kind !== 'error') {
 			bannerTimer = setTimeout(window.__nwHideBanner, 2200);
 		}
-	};
-	window.__nwSetEditing = function (on) {
-		syncEditing(on);
-		if (!on) window.__nwHideBanner();
-	};
-	window.__nwSetSource = function (text) {
-		if (!editor) return;
-		editor.value = typeof text === 'string' ? text : '';
-		editor.scrollTop = 0;
-	};
-	window.__nwGetSource = function () {
-		return editor ? editor.value : '';
 	};
 	function handleShortcut(ev) {
 		if (pickerOpen && ev.key === 'Escape') {
 			ev.preventDefault();
 			ev.stopPropagation();
 			closePicker();
-			return;
-		}
-		if ((ev.ctrlKey || ev.metaKey) && (ev.key === 's' || ev.key === 'S')) {
-			if (!document.body.classList.contains('nw-mode-edit')) return;
-			ev.preventDefault();
-			send('save', '');
-			return;
-		}
-		if (ev.key === 'Escape' && document.body.classList.contains('nw-mode-edit')) {
-			ev.preventDefault();
-			send('cancel', '');
 		}
 	}
-	if (editor) editor.addEventListener('keydown', handleShortcut);
 	if (pickerInput) {
 		pickerInput.addEventListener('input', function () {
 			if (pickerOpen) renderPickerList();
@@ -441,9 +361,6 @@ const SHELL_SCRIPT = `
 			ev.preventDefault();
 			ev.stopPropagation();
 			var action = actionEl.getAttribute('data-nw-action');
-			if (action === 'edit') {
-				action = document.body.classList.contains('nw-mode-edit') ? 'cancel' : 'edit';
-			}
 			send(action, '');
 			return;
 		}
@@ -483,12 +400,10 @@ const SHELL_SCRIPT = `
 			document.body.setAttribute('style', p.bodyStyle || '');
 		}
 		var collapsed = document.body.classList.contains('is-collapsed');
-		var editing = document.body.classList.contains('nw-mode-edit');
 		var edge = document.body.getAttribute('data-nw-edge');
 		var theme = p.theme === 'theme-light' ? 'theme-light' : 'theme-dark';
 		document.documentElement.className = theme;
 		document.body.className = 'nw-body ' + theme;
-		if (editing) document.body.classList.add('nw-mode-edit');
 		if (collapsed) {
 			document.body.classList.add('is-collapsed');
 			if (edge) document.body.setAttribute('data-nw-edge', edge);
@@ -526,9 +441,7 @@ export function buildShellDocument(): string {
 <header class="nw-header">
 	<span class="nw-title" id="nw-title">笔记小部件</span>
 	<button class="nw-btn" type="button" data-nw-action="pick" title="选择笔记">${ICON_PICK}</button>
-	<button class="nw-btn" type="button" data-nw-action="edit" title="切换编辑/预览">${ICON_EDIT}</button>
-	<button class="nw-btn nw-btn-save" type="button" data-nw-action="save" title="保存（Ctrl+S）">${ICON_SAVE}</button>
-	<button class="nw-btn" type="button" data-nw-action="open-source" title="打开源文件">${ICON_OPEN_SOURCE}</button>
+	<button class="nw-btn" type="button" data-nw-action="edit" title="在主窗口中编辑">${ICON_EDIT}</button>
 	<button class="nw-btn" type="button" data-nw-action="pin" title="始终置顶">${ICON_PIN}</button>
 	<button class="nw-btn" type="button" data-nw-action="refresh" title="刷新">${ICON_REFRESH}</button>
 	<button class="nw-btn" type="button" data-nw-action="close" title="关闭小部件">${ICON_CLOSE}</button>
@@ -538,8 +451,7 @@ export function buildShellDocument(): string {
 	<input id="nw-picker-input" class="nw-picker-input" type="text" placeholder="搜索笔记（文件名或路径）" spellcheck="false" autocomplete="off" />
 	<div id="nw-picker-list" class="nw-picker-list"></div>
 </div>
-<textarea id="nw-editor" spellcheck="false" placeholder="Markdown 源码"></textarea>
-<div id="nw-banner" class="nw-banner"><span class="nw-banner-msg" id="nw-banner-msg"></span><span class="nw-banner-actions" id="nw-banner-actions"></span></div>
+<div id="nw-banner" class="nw-banner"><span class="nw-banner-msg" id="nw-banner-msg"></span></div>
 <script>${SHELL_SCRIPT}</script>
 </body>
 </html>`;

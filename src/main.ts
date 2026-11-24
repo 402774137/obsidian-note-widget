@@ -29,7 +29,7 @@ export default class NoteWidgetPlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on("modify", (file) => {
 				if (file instanceof TFile && file.path === this.getTargetFile()?.path) {
-					void this.widget.handleVaultChange();
+					this.widget.handleVaultChange();
 				}
 			})
 		);
